@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ferry_bg">#0E1113</color>
+    <color name="icon_bg_top">#0B4A4C</color>
+    <color name="icon_bg_bottom">#14A37F</color>
+</resources>

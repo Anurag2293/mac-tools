@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Ferry</string>
+    <string name="share_label">Send to Mac</string>
+    <string name="tile_label">Send to Mac</string>
+    <string name="a11y_label">Ferry screenshots</string>
+    <string name="a11y_desc">Lets your Mac take a screenshot of this phone when you run ferry shot. Nothing is captured unless the Mac asks.</string>
+</resources>

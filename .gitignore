@@ -1,0 +1,18 @@
+# Local-only folders that live here but are not part of this repo.
+/fileview/
+/kao-redirect/
+/.archive/
+
+# Build outputs
+.build/
+/mac-use/bin/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store

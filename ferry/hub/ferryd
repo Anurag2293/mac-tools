@@ -1,0 +1,886 @@
+#!/usr/bin/env python3
+"""ferryd: the Mac side of Ferry (run by launchd as com.anurag.ferry; use the `ferry` command).
+
+The Ferry Android app connects here over Tailscale (port 47821 on this Mac's tailnet IP; token in
+~/.config/ferry/token; only the phone's tailnet IP is accepted). Over that connection:
+clipboard text and images both ways, files shared from the phone (saved to ~/Downloads and shown
+with a ferry-peek thumbnail), and live screenshots, which `ferry shot` requests through the
+control socket ~/.config/ferry/ctl.sock ("shot" or "status").
+
+Fallback while the app is not connected: text clipboard over adb with scrcpy's server (video and
+audio off; it runs as the adb shell user, which may read the clipboard in the background). The
+phone is found via adb devices, mDNS, ~/.config/ferry/adb_addr, then a port scan of the phone's
+tailnet IP (~/.config/ferry/phone_host), since the Wireless debugging port changes on every
+toggle and mDNS doesn't cross the tailnet.
+
+    ferryd              run in the foreground (what launchd runs)
+    ferryd install      install + start the launchd agent
+    ferryd uninstall    stop + remove it
+    ferryd status       agent state and phone connection
+    ferryd adb-connect  find the phone over adb (all the methods above); prints the serial
+"""
+
+import asyncio
+import ctypes
+import ctypes.util
+import hashlib
+import hmac
+import json
+import os
+import random
+import resource
+import shutil
+import socket
+import struct
+import subprocess
+import sys
+import threading
+import tempfile
+import time
+import uuid
+from pathlib import Path
+
+LABEL = "com.anurag.ferry"
+PLIST = Path.home() / "Library/LaunchAgents" / f"{LABEL}.plist"
+LOG = Path.home() / "Library/Logs/ferry.log"
+LAST_ADDR_FILE = Path.home() / ".config/ferry/adb_addr"
+TAILNET_HOST_FILE = Path.home() / ".config/ferry/phone_host"
+TAILSCALE = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+SCAN_PORTS = range(32768, 61000)  # Linux ephemeral range; adbd binds port 0
+SCAN_INTERVAL = 60
+DEVICE_JAR = "/data/local/tmp/ferry-scrcpy-server.jar"
+POLL_SECONDS = 0.4
+MAX_TEXT = (1 << 18) - 14  # scrcpy's CLIPBOARD_TEXT_MAX_LENGTH for SET_CLIPBOARD
+
+LINK_PORT = 47821
+LINK_DIR = Path.home() / ".config/ferry"
+TOKEN_FILE = LINK_DIR / "token"
+CTL_SOCK = LINK_DIR / "ctl.sock"
+DOWNLOADS = Path.home() / "Downloads"
+PHONEPEEK_BIN = Path(__file__).resolve().parent.parent / ".build/ferry-peek"
+MAX_IMAGE = 25 << 20
+MAX_FRAME_DATA = 64 << 20
+
+# scrcpy control protocol (server/src/main/java/com/genymobile/scrcpy/control/)
+CTRL_SET_CLIPBOARD = 9
+DEV_CLIPBOARD = 0
+DEV_ACK_CLIPBOARD = 1
+DEV_UHID_OUTPUT = 2
+
+ENV = {**os.environ, "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8"}
+ENV["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + ENV.get("PATH", "/usr/bin:/bin")
+
+
+LOG_STREAM = sys.stdout  # the agent's stdout is the log file; CLI subcommands switch to stderr
+
+
+def log(msg):
+    print(time.strftime("%Y-%m-%d %H:%M:%S"), msg, file=LOG_STREAM, flush=True)
+
+
+def run(*args, timeout=15):
+    try:
+        r = subprocess.run(args, capture_output=True, env=ENV, timeout=timeout)
+        return r.returncode, r.stdout.decode("utf-8", "replace")
+    except subprocess.TimeoutExpired:
+        return 124, ""
+
+
+def adb(*args, serial=None, timeout=15):
+    pre = ["adb"] + (["-s", serial] if serial else [])
+    return run(*pre, *args, timeout=timeout)
+
+
+# --- scrcpy server ---------------------------------------------------------------------------
+
+def find_server():
+    for p in [os.environ.get("SCRCPY_SERVER_PATH", ""),
+              "/opt/homebrew/share/scrcpy/scrcpy-server",
+              "/usr/local/share/scrcpy/scrcpy-server"]:
+        if p and os.path.isfile(p):
+            return p
+    sys.exit("ferryd: scrcpy-server not found (brew install scrcpy)")
+
+
+def scrcpy_version():
+    _, out = run("scrcpy", "--version")
+    # "scrcpy 5.0.1 <https://...>"
+    parts = out.split()
+    if len(parts) < 2:
+        sys.exit("ferryd: could not read scrcpy version (brew install scrcpy)")
+    return parts[1]
+
+
+# --- Mac clipboard ---------------------------------------------------------------------------
+
+def mac_get():
+    try:
+        return subprocess.run(["pbpaste"], capture_output=True, env=ENV, timeout=5).stdout.decode("utf-8", "replace")
+    except subprocess.TimeoutExpired:
+        return ""
+
+
+def mac_set(text):
+    subprocess.run(["pbcopy"], input=text.encode("utf-8"), env=ENV, timeout=5)
+
+
+def _change_count_fn():
+    """NSPasteboard.generalPasteboard.changeCount via the ObjC runtime (cheap enough to poll)."""
+    try:
+        objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
+        ctypes.cdll.LoadLibrary("/System/Library/Frameworks/AppKit.framework/AppKit")
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.objc_getClass.argtypes = [ctypes.c_char_p]
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+        addr = ctypes.cast(objc.objc_msgSend, ctypes.c_void_p).value
+        get_obj = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(addr)
+        get_long = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p)(addr)
+        pb = get_obj(objc.objc_getClass(b"NSPasteboard"), objc.sel_registerName(b"generalPasteboard"))
+        sel = objc.sel_registerName(b"changeCount")
+        get_long(pb, sel)
+        return lambda: get_long(pb, sel)
+    except (OSError, AttributeError, TypeError) as e:
+        log(f"pasteboard change count unavailable ({e}); Mac->phone images disabled")
+        return None
+
+
+def mac_get_image():
+    """PNG bytes of an image on the Mac clipboard, or None."""
+    fd, path = tempfile.mkstemp(suffix=".png")
+    os.close(fd)
+    script = f'''
+try
+    set d to the clipboard as «class PNGf»
+on error
+    return "none"
+end try
+set fh to open for access (POSIX file "{path}") with write permission
+set eof fh to 0
+write d to fh
+close access fh
+return "ok"
+'''
+    try:
+        r = subprocess.run(["osascript", "-e", script], capture_output=True, env=ENV, timeout=10)
+        if r.stdout.strip() != b"ok":
+            return None
+        data = Path(path).read_bytes()
+        return data if 0 < len(data) <= MAX_IMAGE else None
+    except subprocess.TimeoutExpired:
+        return None
+    finally:
+        os.unlink(path)
+
+
+def mac_set_image(data, mime):
+    fd, path = tempfile.mkstemp(suffix=".jpg" if "jpeg" in mime else ".png")
+    os.write(fd, data)
+    os.close(fd)
+    try:
+        cls = "JPEG picture" if "jpeg" in mime else "«class PNGf»"
+        if mime not in ("image/png", "image/jpeg"):
+            subprocess.run(["sips", "-s", "format", "png", path, "--out", path], capture_output=True, timeout=20)
+            cls = "«class PNGf»"
+        subprocess.run(["osascript", "-e", f'set the clipboard to (read (POSIX file "{path}") as {cls})'],
+                       capture_output=True, env=ENV, timeout=10)
+    finally:
+        os.unlink(path)
+
+
+def show_received(path):
+    """ferry-peek thumbnail for a file shared from the phone; click shows it in Finder."""
+    if PHONEPEEK_BIN.exists():
+        subprocess.Popen([str(PHONEPEEK_BIN), "--show", str(path), "--reveal"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    else:
+        notify("From phone", f"Saved {path.name} to Downloads")
+
+
+_text_card = None
+
+
+def show_text(text, sensitive=False):
+    """Top-right ferry-peek card for text copied on the phone; replaces the one still showing."""
+    global _text_card
+    if not PHONEPEEK_BIN.exists():
+        return
+    if _text_card and _text_card.poll() is None:
+        _text_card.terminate()
+    try:
+        _text_card = subprocess.Popen([str(PHONEPEEK_BIN), "--text"] + (["--sensitive"] if sensitive else []),
+                                      stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                      stderr=subprocess.DEVNULL, start_new_session=True)
+        _text_card.stdin.write(text.encode())
+        _text_card.stdin.close()
+    except OSError as e:
+        log(f"text card failed: {e}")
+
+
+def notify(title, msg):
+    msg = msg.replace("\\", "\\\\").replace('"', '\\"')
+    subprocess.Popen(["osascript", "-e", f'display notification "{msg}" with title "{title}"'],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=ENV)
+
+
+# --- device discovery (adb fallback) ---------------------------------------------------------
+
+def connected_serial():
+    _, out = adb("devices")
+    for line in out.splitlines()[1:]:
+        f = line.split()
+        if len(f) >= 2 and f[1] == "device":
+            return f[0]
+    return None
+
+
+def try_connect(addr):
+    _, out = adb("connect", addr, timeout=8)
+    if "connected to" in out:
+        time.sleep(0.5)
+        return connected_serial()
+    return None
+
+
+def remember(addr):
+    LAST_ADDR_FILE.parent.mkdir(parents=True, exist_ok=True)
+    LAST_ADDR_FILE.write_text(addr + "\n")
+
+
+def tailnet_online(host):
+    """False only when Tailscale positively reports the peer offline (a scan would just time out)."""
+    code, out = run(TAILSCALE, "status", "--json")
+    if code != 0:
+        return True
+    try:
+        peers = json.loads(out).get("Peer") or {}
+    except ValueError:
+        return True
+    for p in peers.values():
+        if host in (p.get("TailscaleIPs") or []):
+            return bool(p.get("Online"))
+    return True
+
+
+def scan_open_ports(host):
+    async def probe(sem, port, found):
+        async with sem:
+            try:
+                _, w = await asyncio.wait_for(asyncio.open_connection(host, port), 3)
+                found.append(port)
+                w.close()
+            except (OSError, asyncio.TimeoutError):
+                pass
+
+    async def main():
+        sem = asyncio.Semaphore(800)
+        found = []
+        await asyncio.gather(*(probe(sem, p, found) for p in SCAN_PORTS))
+        return sorted(found)
+
+    return asyncio.run(main())
+
+
+last_scan = 0.0
+
+
+def scan_tailnet():
+    global last_scan
+    if not TAILNET_HOST_FILE.exists() or time.time() - last_scan < SCAN_INTERVAL:
+        return None
+    last_scan = time.time()
+    host = TAILNET_HOST_FILE.read_text().strip()
+    if not host or not tailnet_online(host):
+        return None
+    for port in scan_open_ports(host):
+        addr = f"{host}:{port}"
+        serial = try_connect(addr)
+        if serial:
+            log(f"found Wireless debugging at {addr}")
+            remember(addr)
+            return serial
+    return None
+
+
+def ensure_connected():
+    serial = connected_serial()
+    if serial:
+        return serial
+    _, out = adb("mdns", "services")
+    for line in out.splitlines():
+        if "_adb-tls-connect._tcp" in line:
+            addr = line.split()[-1]
+            serial = try_connect(addr)
+            if serial:
+                remember(addr)
+                return serial
+    if LAST_ADDR_FILE.exists():
+        serial = try_connect(LAST_ADDR_FILE.read_text().strip())
+        if serial:
+            return serial
+    return scan_tailnet()
+
+
+# --- session ---------------------------------------------------------------------------------
+
+def recv_exact(sock, n):
+    buf = bytearray(n)
+    view = memoryview(buf)
+    got = 0
+    while got < n:
+        k = sock.recv_into(view[got:], n - got)
+        if not k:
+            raise ConnectionError("socket closed")
+        got += k
+    return bytes(buf)
+
+
+# Ferry wire format: u32 header length, JSON header, then header["size"] raw bytes.
+def read_frame(sock):
+    n = struct.unpack(">I", recv_exact(sock, 4))[0]
+    if not 0 < n <= (4 << 20):
+        raise ConnectionError(f"bad header length {n}")
+    hdr = json.loads(recv_exact(sock, n))
+    size = int(hdr.get("size", 0))
+    if not 0 <= size <= MAX_FRAME_DATA:
+        raise ConnectionError(f"bad data size {size}")
+    return hdr, (recv_exact(sock, size) if size else None)
+
+
+def write_frame(sock, hdr, data=None):
+    if data is not None:
+        hdr = {**hdr, "size": len(data)}
+    raw = json.dumps(hdr).encode()
+    sock.sendall(struct.pack(">I", len(raw)) + raw + (data or b""))
+
+
+class Session:
+    def __init__(self, state, serial, server_path, version):
+        self.state = state
+        self.serial = serial
+        self.server_path = server_path
+        self.version = version
+        self.proc = None
+        self.sock = None
+        self.port = None
+        self.dead = threading.Event()
+        self.closing = False
+
+    def start(self):
+        # Push the server only when it changed (it's ~90 KB, but this runs on every reconnect).
+        local_size = os.path.getsize(self.server_path)
+        _, out = adb("shell", f"stat -c %s {DEVICE_JAR} 2>/dev/null", serial=self.serial)
+        if out.strip() != str(local_size):
+            code, out = adb("push", self.server_path, DEVICE_JAR, serial=self.serial, timeout=60)
+            if code != 0:
+                raise RuntimeError(f"push failed: {out.strip()}")
+
+        scid = random.randint(0, 0x7FFFFFFF)
+        code, out = adb("forward", "tcp:0", f"localabstract:scrcpy_{scid:08x}", serial=self.serial)
+        if code != 0:
+            raise RuntimeError(f"adb forward failed: {out.strip()}")
+        self.port = int(out.strip())
+
+        cmd = (f"CLASSPATH={DEVICE_JAR} app_process / com.genymobile.scrcpy.Server {self.version} "
+               f"scid={scid:08x} log_level=warn tunnel_forward=true video=false audio=false control=true "
+               "clipboard_autosync=true power_on=false cleanup=false send_device_meta=false")
+        self.proc = subprocess.Popen(["adb", "-s", self.serial, "shell", cmd], env=ENV,
+                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        threading.Thread(target=self._pipe_server_log, daemon=True).start()
+
+        # With adb forward, connect() succeeds before the server listens; the dummy byte
+        # tells us the server actually accepted.
+        deadline = time.time() + 10
+        while True:
+            if self.proc.poll() is not None:
+                raise RuntimeError("server exited during startup")
+            try:
+                s = socket.create_connection(("127.0.0.1", self.port), timeout=2)
+                s.settimeout(2)
+                if s.recv(1) == b"\x00":
+                    s.settimeout(None)
+                    self.sock = s
+                    break
+                s.close()
+            except OSError:
+                pass
+            if time.time() > deadline:
+                raise RuntimeError("timed out waiting for server")
+            time.sleep(0.2)
+
+        threading.Thread(target=self._reader, daemon=True).start()
+
+    def _pipe_server_log(self):
+        for line in self.proc.stdout:
+            line = line.decode("utf-8", "replace").rstrip()
+            if line:
+                log(f"[phone] {line}")
+        self.dead.set()
+
+    def _reader(self):
+        try:
+            while True:
+                t = recv_exact(self.sock, 1)[0]
+                if t == DEV_CLIPBOARD:
+                    n = struct.unpack(">I", recv_exact(self.sock, 4))[0]
+                    text = recv_exact(self.sock, n).decode("utf-8", "replace")
+                    self.state.from_phone(text)
+                elif t == DEV_ACK_CLIPBOARD:
+                    recv_exact(self.sock, 8)
+                elif t == DEV_UHID_OUTPUT:
+                    recv_exact(self.sock, 2)
+                    n = struct.unpack(">H", recv_exact(self.sock, 2))[0]
+                    recv_exact(self.sock, n)
+                else:
+                    raise ConnectionError(f"unknown device message type {t}")
+        except (OSError, ConnectionError) as e:
+            if not self.closing:
+                log(f"control socket closed: {e}")
+        self.dead.set()
+
+    def send_clipboard(self, text):
+        raw = text.encode("utf-8")
+        if len(raw) > MAX_TEXT:
+            log(f"Mac clipboard too large to sync ({len(raw)} bytes), skipped")
+            return
+        msg = struct.pack(">BQBI", CTRL_SET_CLIPBOARD, 0, 0, len(raw)) + raw
+        self.sock.sendall(msg)
+
+    def close(self):
+        self.closing = True
+        if self.sock:
+            try:
+                self.sock.close()
+            except OSError:
+                pass
+        if self.proc and self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(3)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+        if self.port:
+            adb("forward", "--remove", f"tcp:{self.port}", serial=self.serial)
+
+
+class State:
+    """Last text known to be on both sides; used to suppress echoes."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.synced = mac_get()
+        self.session = None      # active adb/scrcpy Session, if any
+        self.own_change = None   # pasteboard changeCount right after we wrote to it
+        self.sent_image = None   # sha256 of the last image we sent to the phone
+
+    def from_phone(self, text, sensitive=False):
+        with self.lock:
+            if not text or text == self.synced:
+                return False
+            self.synced = text
+        mac_set(text)
+        log(f"phone -> Mac ({len(text)} chars{', sensitive' if sensitive else ''})")
+        show_text(text, sensitive)
+        return True
+
+
+# --- Ferry app transport ------------------------------------------------------------------
+
+def tailscale_ip():
+    """This Mac's tailnet IPv4 (100.64.0.0/10), read from the utun interfaces."""
+    import ipaddress
+    cgnat = ipaddress.ip_network("100.64.0.0/10")
+    _, out = run("/sbin/ifconfig")
+    for line in out.splitlines():
+        f = line.split()
+        if len(f) >= 2 and f[0] == "inet":
+            try:
+                if ipaddress.ip_address(f[1]) in cgnat:
+                    return f[1]
+            except ValueError:
+                pass
+    return None
+
+
+def link_token():
+    if not TOKEN_FILE.exists():
+        LINK_DIR.mkdir(parents=True, exist_ok=True)
+        TOKEN_FILE.write_text(uuid.uuid4().hex + uuid.uuid4().hex + "\n")
+        TOKEN_FILE.chmod(0o600)
+    return TOKEN_FILE.read_text().strip()
+
+
+def unique_download(name):
+    name = os.path.basename(name.replace("\\", "/")).lstrip(".") or "from-phone"
+    DOWNLOADS.mkdir(exist_ok=True)
+    path = DOWNLOADS / name
+    stem, ext = os.path.splitext(name)
+    i = 1
+    while path.exists():
+        path = DOWNLOADS / f"{stem} ({i}){ext}"
+        i += 1
+    return path
+
+
+class Link:
+    """Server side of the Ferry app connection (one phone at a time)."""
+
+    def __init__(self, state):
+        self.state = state
+        self.lock = threading.Lock()   # guards conn and serializes writes
+        self.conn = None
+        self.model = ""
+        self.pending = {}              # screenshot id -> [Event, png, err]
+
+    @property
+    def connected(self):
+        return self.conn is not None
+
+    def start(self):
+        threading.Thread(target=self._serve, daemon=True).start()
+        threading.Thread(target=self._pinger, daemon=True).start()
+
+    def _serve(self):
+        token = link_token()
+        while True:
+            ip = tailscale_ip()
+            if not ip:
+                time.sleep(15)
+                continue
+            try:
+                srv = socket.create_server((ip, LINK_PORT))
+            except OSError as e:
+                log(f"link: cannot listen on {ip}:{LINK_PORT}: {e}")
+                time.sleep(15)
+                continue
+            log(f"link: listening on {ip}:{LINK_PORT}")
+            srv.settimeout(60)
+            while True:
+                try:
+                    conn, addr = srv.accept()
+                except socket.timeout:
+                    if tailscale_ip() != ip:   # tailnet address changed: rebind
+                        break
+                    continue
+                except OSError as e:
+                    log(f"link: accept failed: {e}")
+                    break
+                threading.Thread(target=self._handle, args=(conn, addr, token), daemon=True).start()
+            srv.close()
+
+    def _handle(self, conn, addr, token):
+        phone_ip = TAILNET_HOST_FILE.read_text().strip() if TAILNET_HOST_FILE.exists() else ""
+        if phone_ip and addr[0] != phone_ip:
+            log(f"link: rejected connection from {addr[0]} (expected {phone_ip})")
+            conn.close()
+            return
+        try:
+            conn.settimeout(15)
+            hdr, _ = read_frame(conn)
+            if hdr.get("t") != "hello" or not hmac.compare_digest(str(hdr.get("token", "")), token):
+                write_frame(conn, {"t": "error", "err": "bad token"})
+                log(f"link: rejected {addr[0]}: bad token")
+                conn.close()
+                return
+            conn.settimeout(75)  # we ping every 20 s and the app answers
+            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            with self.lock:
+                old, self.conn, self.model = self.conn, conn, hdr.get("model", "phone")
+                write_frame(conn, {"t": "welcome"})
+            if old:
+                try:
+                    old.close()
+                except OSError:
+                    pass
+            log(f"link: {self.model} connected from {addr[0]}")
+            while True:
+                hdr, data = read_frame(conn)
+                self._dispatch(hdr, data)
+        except (OSError, ConnectionError, ValueError) as e:
+            with self.lock:
+                mine = self.conn is conn
+                if mine:
+                    self.conn = None
+            if mine:
+                log(f"link: disconnected ({e})")
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    def _dispatch(self, hdr, data):
+        t = hdr.get("t")
+        if t == "pong":
+            return
+        if t == "clip":
+            self.state.from_phone(hdr.get("text", ""), bool(hdr.get("sensitive")))
+        elif t == "clip_img" and data:
+            if hashlib.sha256(data).digest() == self.state.sent_image:
+                return  # our own image coming back
+            mac_set_image(data, hdr.get("mime", "image/png"))
+            cc = change_count() if change_count else None
+            with self.state.lock:
+                self.state.own_change = cc
+                self.state.synced = mac_get()
+            log(f"phone -> Mac (image, {len(data)} bytes)")
+        elif t == "file" and data:
+            path = unique_download(hdr.get("name", "from-phone"))
+            path.write_bytes(data)
+            log(f"phone -> Mac file {path}")
+            show_received(path)
+        elif t == "shot":
+            entry = self.pending.get(hdr.get("id"))
+            if entry:
+                entry[1], entry[2] = (data, None) if hdr.get("ok") else (None, hdr.get("err", "failed"))
+                entry[0].set()
+        else:
+            log(f"link: unknown message {t}")
+
+    def send(self, hdr, data=None):
+        with self.lock:
+            c = self.conn
+            if not c:
+                return False
+            try:
+                write_frame(c, hdr, data)
+                return True
+            except OSError as e:
+                log(f"link: send failed ({e})")
+                self.conn = None
+        try:
+            c.close()
+        except OSError:
+            pass
+        return False
+
+    def _pinger(self):
+        while True:
+            time.sleep(20)
+            if self.connected:
+                self.send({"t": "ping"})
+
+    def screenshot(self, timeout=15):
+        sid = uuid.uuid4().hex[:12]
+        entry = [threading.Event(), None, None]
+        self.pending[sid] = entry
+        try:
+            if not self.send({"t": "shot", "id": sid}):
+                return None, "phone app not connected"
+            if not entry[0].wait(timeout):
+                return None, "timed out waiting for the phone"
+            return entry[1], entry[2]
+        finally:
+            self.pending.pop(sid, None)
+
+
+def serve_control(link):
+    """Local unix socket for the ferry command: 'shot' or 'status'."""
+    LINK_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        CTL_SOCK.unlink()
+    except FileNotFoundError:
+        pass
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(str(CTL_SOCK))
+    CTL_SOCK.chmod(0o600)
+    srv.listen(4)
+
+    def handle(c):
+        with c:
+            c.settimeout(5)
+            try:
+                cmd = c.recv(64).decode(errors="replace").strip()
+                c.settimeout(None)
+                if cmd == "shot":
+                    png, err = link.screenshot()
+                    if png:
+                        c.sendall(f"ok {len(png)}\n".encode() + png)
+                    else:
+                        c.sendall(f"err {err}\n".encode())
+                elif cmd == "status":
+                    c.sendall((f"ok connected {link.model}\n" if link.connected else "ok disconnected\n").encode())
+                else:
+                    c.sendall(b"err unknown command\n")
+            except OSError:
+                pass
+
+    def loop():
+        while True:
+            c, _ = srv.accept()
+            threading.Thread(target=handle, args=(c,), daemon=True).start()
+
+    threading.Thread(target=loop, daemon=True).start()
+
+
+change_count = None
+
+
+def push_text(state, link, text):
+    if link.connected:
+        return link.send({"t": "clip", "text": text})
+    session = state.session
+    if session and not session.dead.is_set():
+        session.send_clipboard(text)
+        return True
+    return False
+
+
+def watch_mac(state, link):
+    """Poll the Mac clipboard and push changes to whichever transport is up."""
+    last_cc = change_count() if change_count else None
+    while True:
+        time.sleep(POLL_SECONDS)
+        text = mac_get()
+        if text:
+            with state.lock:
+                pending = text != state.synced
+            if pending and push_text(state, link, text):
+                with state.lock:
+                    state.synced = text
+                log(f"Mac -> phone ({len(text)} chars{'' if link.connected else ', adb'})")
+        if not change_count:
+            continue
+        cc = change_count()
+        if cc == last_cc:
+            continue
+        last_cc = cc
+        if text or cc == state.own_change or not link.connected:
+            continue
+        img = mac_get_image()
+        if img and link.send({"t": "clip_img", "mime": "image/png"}, img):
+            state.sent_image = hashlib.sha256(img).digest()
+            log(f"Mac -> phone (image, {len(img)} bytes)")
+
+
+def adb_loop(state, link, server_path, version):
+    """Fallback: scrcpy-server over adb, only while the Ferry app is not connected."""
+    time.sleep(8)  # give a running Ferry app time to reconnect after a restart
+    backoff = 2
+    waiting_logged = False
+    while True:
+        if link.connected:
+            time.sleep(1)
+            continue
+        serial = ensure_connected()
+        if not serial:
+            if not waiting_logged:
+                log("adb: phone not reachable; waiting for the Ferry app or Wireless debugging")
+                waiting_logged = True
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 30)
+            continue
+        waiting_logged = False
+        backoff = 2
+        session = Session(state, serial, server_path, version)
+        try:
+            session.start()
+            state.session = session
+            log(f"adb: syncing with {serial}")
+            while not session.dead.is_set() and not link.connected:
+                session.dead.wait(0.5)
+            if link.connected:
+                log("adb: Ferry app connected; closing adb session")
+        except (OSError, RuntimeError) as e:
+            log(f"adb: session error: {e}")
+        finally:
+            state.session = None
+            session.close()
+        time.sleep(2)
+
+
+def serve():
+    global change_count
+    # launchd agents get a 256-fd soft limit; the tailnet port scan keeps 800 sockets open.
+    _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (min(4096, hard), hard))
+    change_count = _change_count_fn()
+    state = State()
+    link = Link(state)
+    link.start()
+    serve_control(link)
+    have_adb = shutil.which("adb", path=ENV["PATH"]) is not None
+    if have_adb:
+        server_path = find_server()
+        version = scrcpy_version()
+        threading.Thread(target=adb_loop, args=(state, link, server_path, version), daemon=True).start()
+        log(f"ferryd started (Ferry app on :{LINK_PORT}, adb fallback with scrcpy server {version})")
+    else:
+        log(f"ferryd started (Ferry app on :{LINK_PORT}; adb not installed, no fallback)")
+    watch_mac(state, link)
+
+
+# --- launchd ---------------------------------------------------------------------------------
+
+def install():
+    script = Path(__file__).resolve()
+    PLIST.write_text(f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>{LABEL}</string>
+  <key>ProgramArguments</key>
+  <array><string>{sys.executable}</string><string>{script}</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>{LOG}</string>
+  <key>StandardErrorPath</key><string>{LOG}</string>
+</dict>
+</plist>
+""")
+    uid = os.getuid()
+    run("launchctl", "bootout", f"gui/{uid}/{LABEL}")
+    for _ in range(10):
+        code, out = run("launchctl", "bootstrap", f"gui/{uid}", str(PLIST))
+        if code == 0:
+            break
+        time.sleep(0.5)
+    if code != 0:
+        sys.exit(f"launchctl bootstrap failed: {out}")
+    print(f"installed {PLIST}\nlog: {LOG}")
+
+
+def uninstall():
+    run("launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}")
+    PLIST.unlink(missing_ok=True)
+    print("uninstalled")
+
+
+def status():
+    _, out = run("launchctl", "print", f"gui/{os.getuid()}/{LABEL}")
+    state = next((l.strip() for l in out.splitlines() if l.strip().startswith("state =")), "not loaded")
+    print(f"agent: {state}")
+    try:
+        c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        c.settimeout(3)
+        c.connect(str(CTL_SOCK))
+        c.sendall(b"status\n")
+        print("phone app:", c.recv(200).decode().strip().removeprefix("ok "))
+        c.close()
+    except OSError:
+        print("phone app: unknown (agent not answering)")
+    print(adb("devices")[1].rstrip())
+    if LOG.exists():
+        print("--- log ---")
+        print("\n".join(LOG.read_text(errors="replace").splitlines()[-10:]))
+
+
+if __name__ == "__main__":
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    if cmd == "":
+        serve()
+    elif cmd == "install":
+        install()
+    elif cmd == "uninstall":
+        uninstall()
+    elif cmd == "status":
+        status()
+    elif cmd == "adb-connect":
+        LOG_STREAM = sys.stderr
+        serial = ensure_connected()
+        if not serial:
+            sys.exit(1)
+        print(serial)
+    else:
+        print(__doc__.strip())

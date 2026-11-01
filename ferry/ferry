@@ -1,0 +1,377 @@
+#!/usr/bin/env bash
+# ferry: clipboard, files and screenshots between this Mac and the Pixel (Ferry Android app).
+#
+#   ferry shot              live screenshot of the phone (works locked, on Wi-Fi or mobile data)
+#   ferry last [N]          the N newest screenshots taken on the phone (default 1)
+#   ferry status            Mac services, phone app, Syncthing and adb at a glance
+#
+#   ferry setup             install / restart the Mac background services (hub + corner previews)
+#   ferry uninstall         stop and remove them
+#   ferry app install       build the Android app and install it on the phone (needs adb once)
+#   ferry app build         only build .build/ferry.apk
+#   ferry logs [hub|peek|app]   follow a log (default hub)
+#   ferry peek [FILE]       show the corner thumbnail for FILE (default: newest phone screenshot)
+#   ferry adb connect|pair [HOST:PORT] CODE|tcpip|status
+#
+# Shots and `last` print absolute paths, one per line, and copy the newest image to the Mac
+# clipboard (which the hub also puts on the phone clipboard). Live shots are saved in
+# ~/Pictures/Ferry; `last` reads ~/Pictures/PhoneScreenshots, kept in sync by Syncthing.
+# Everything goes over Tailscale; adb is only a fallback and is needed to install the app.
+
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+HUB="$HERE/hub/ferryd"
+PEEK_SRC="$HERE/peek/peek.swift"
+PEEK_BIN="$HERE/.build/ferry-peek"
+APP_SRC="$HERE/android"
+BUILD="$HERE/.build"
+CONF="$HOME/.config/ferry"
+CTL_SOCK="$CONF/ctl.sock"
+SHOTS_DIR="${FERRY_SHOTS_DIR:-$HOME/Pictures/Ferry}"
+SYNC_DIR="${FERRY_SYNC_DIR:-$HOME/Pictures/PhoneScreenshots}"
+SYNC_FOLDER_ID="pixel-screenshots"
+SYNCTHING_CONFIG="$HOME/Library/Application Support/Syncthing/config.xml"
+PHONE_SHOT_DIRS=(/sdcard/Pictures/Screenshots /sdcard/DCIM/Screenshots)
+PEEK_LABEL="com.anurag.ferry-peek"
+PEEK_PLIST="$HOME/Library/LaunchAgents/$PEEK_LABEL.plist"
+PEEK_LOG="$HOME/Library/Logs/ferry-peek.log"
+HUB_LOG="$HOME/Library/Logs/ferry.log"
+PKG="com.anurag.ferry"
+OLD_PKG="com.anurag.phonelink"
+PORT=47821
+SDK="${ANDROID_HOME:-/opt/homebrew/share/android-commandlinetools}"
+BT="$SDK/build-tools/36.1.0"
+PLATFORM_JAR="$SDK/platforms/android-36.1/android.jar"
+JDK="${FERRY_JDK:-/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home}"
+KEYSTORE="$CONF/release.keystore"
+
+die() { echo "ferry: $*" >&2; exit 1; }
+
+# --- helpers -------------------------------------------------------------------------------
+
+copy_to_clipboard() {
+  local f="$1" cls="«class PNGf»"
+  [[ "$f" == *.jpg || "$f" == *.jpeg ]] && cls="JPEG picture"
+  osascript -e "set the clipboard to (read (POSIX file \"$f\") as $cls)" >/dev/null 2>&1 || true
+}
+
+# Ask the hub over its control socket. Prints the reply; for "shot" writes the PNG to $2.
+hub_ctl() {
+  python3 -I - "$CTL_SOCK" "$@" <<'PY'
+import socket, sys
+sock, cmd = sys.argv[1], sys.argv[2]
+c = socket.socket(socket.AF_UNIX)
+c.settimeout(20)
+try:
+    c.connect(sock)
+except OSError:
+    print("hub not running (ferry setup)", file=sys.stderr)
+    sys.exit(2)
+c.sendall(cmd.encode() + b"\n")
+f = c.makefile("rb")
+line = f.readline().decode().strip()
+if not line.startswith("ok"):
+    print(line.removeprefix("err "), file=sys.stderr)
+    sys.exit(1)
+if cmd == "shot":
+    open(sys.argv[3], "wb").write(f.read(int(line.split()[1])))
+else:
+    print(line.removeprefix("ok ").strip())
+PY
+}
+
+adb_serial() {
+  command -v adb >/dev/null || die "adb not found (brew install --cask android-platform-tools)"
+  local s
+  s="$(adb devices | awk 'NR>1 && $2=="device" {print $1; exit}')"
+  [[ -n "$s" ]] || s="$("$HUB" adb-connect 2>/dev/null || true)"
+  [[ -n "$s" ]] || die "phone not reachable over adb. Turn on Developer options > Wireless debugging (first time: ferry adb pair HOST:PORT CODE)."
+  echo "$s"
+}
+
+# --- shot / last -----------------------------------------------------------------------------
+
+cmd_shot() {
+  mkdir -p "$SHOTS_DIR"
+  local out="$SHOTS_DIR/live_$(date +%Y%m%d-%H%M%S).png" err
+  if err="$(hub_ctl shot "$out" 2>&1)" && [[ -s "$out" ]]; then
+    copy_to_clipboard "$out"
+    echo "$out"
+    return
+  fi
+  rm -f "$out"
+  echo "ferry: app capture failed ($err); trying adb" >&2
+  local s; s="$(adb_serial)"
+  adb -s "$s" exec-out screencap -p > "$out"
+  [[ -s "$out" ]] || { rm -f "$out"; die "screencap returned no data"; }
+  copy_to_clipboard "$out"
+  echo "$out"
+}
+
+# Is the Syncthing screenshot folder fully synced? synced | syncing | offline | unknown
+sync_state() {
+  local key
+  key="$(sed -n 's:.*<apikey>\(.*\)</apikey>.*:\1:p' "$SYNCTHING_CONFIG" 2>/dev/null | head -n 1)"
+  [[ -n "$key" ]] || { echo unknown; return; }
+  python3 -I - "$key" "$SYNC_FOLDER_ID" <<'PY' 2>/dev/null || echo unknown
+import json, ssl, sys, urllib.request
+key, fid = sys.argv[1], sys.argv[2]
+ctx = ssl._create_unverified_context()
+def get(path):
+    req = urllib.request.Request("https://127.0.0.1:8384" + path, headers={"X-API-Key": key})
+    return json.load(urllib.request.urlopen(req, context=ctx, timeout=3))
+peers = {d["deviceID"] for d in get(f"/rest/config/folders/{fid}")["devices"]}
+conns = get("/rest/system/connections")["connections"]
+if not any(conns.get(p, {}).get("connected") for p in peers):
+    print("offline"); sys.exit()
+st = get(f"/rest/db/status?folder={fid}")
+print("synced" if st["state"] == "idle" and st["needFiles"] == 0 else "syncing")
+PY
+}
+
+synced_files() {
+  find "$SYNC_DIR" -maxdepth 1 -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.webp' \) \
+    ! -name '.*' -exec stat -f '%m %N' {} + 2>/dev/null | sort -rn | awk -v n="$1" 'NR <= n' | cut -d' ' -f2-
+}
+
+cmd_last() {
+  local n="${1:-1}" state="" i files newest="" s dir="" d f out
+  [[ "$n" =~ ^[0-9]+$ && "$n" -ge 1 ]] || die "N must be a positive number"
+  if [[ -n "$(synced_files 1)" ]]; then
+    state="$(sync_state)"
+    for ((i = 0; i < 20; i++)); do
+      [[ "$state" == syncing ]] || break
+      sleep 0.5; state="$(sync_state)"
+    done
+    case "$state" in
+      syncing) echo "ferry: still syncing; the newest screenshot may not be here yet" >&2 ;;
+      offline) echo "ferry: phone not connected to Syncthing; showing what was synced before" >&2 ;;
+      unknown) echo "ferry: Syncthing not reachable (brew services start syncthing); folder may be stale" >&2 ;;
+    esac
+    files="$(synced_files "$n")"
+    echo "$files"
+    copy_to_clipboard "$(head -n 1 <<< "$files")"
+    return
+  fi
+  s="$(adb_serial)"
+  for d in "${PHONE_SHOT_DIRS[@]}"; do
+    [[ -n "$(adb -s "$s" shell "ls $d 2>/dev/null | head -n 1" | tr -d '\r')" ]] && { dir="$d"; break; }
+  done
+  [[ -n "$dir" ]] || die "no screenshots found on the phone"
+  mkdir -p "$SHOTS_DIR"
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    out="$SHOTS_DIR/$f"
+    [[ -s "$out" ]] || adb -s "$s" pull "$dir/$f" "$out" >/dev/null
+    [[ -z "$newest" ]] && newest="$out"
+    echo "$out"
+  done < <(adb -s "$s" shell "ls -t $dir | head -n $n" | tr -d '\r')
+  [[ -n "$newest" ]] && copy_to_clipboard "$newest"
+}
+
+# --- Mac services ----------------------------------------------------------------------------
+
+peek_build() {
+  if [[ ! -x "$PEEK_BIN" || "$PEEK_SRC" -nt "$PEEK_BIN" ]]; then
+    mkdir -p "$BUILD"
+    swiftc -O -o "$PEEK_BIN" "$PEEK_SRC" -framework AppKit
+  fi
+}
+
+launchd_load() {  # plist label
+  launchctl bootout "gui/$(id -u)/$2" 2>/dev/null || true
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    launchctl bootstrap "gui/$(id -u)" "$1" 2>/dev/null && return 0
+    sleep 0.5
+  done
+  die "launchctl bootstrap failed for $2"
+}
+
+cmd_setup() {
+  mkdir -p "$CONF" "$(dirname "$PEEK_PLIST")"
+  "$HUB" install >/dev/null
+  echo "hub: com.anurag.ferry (log $HUB_LOG)"
+  peek_build
+  cat > "$PEEK_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$PEEK_LABEL</string>
+  <key>ProgramArguments</key><array><string>$PEEK_BIN</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>LimitLoadToSessionType</key><string>Aqua</string>
+  <key>ProcessType</key><string>Interactive</string>
+  <key>StandardOutPath</key><string>$PEEK_LOG</string>
+  <key>StandardErrorPath</key><string>$PEEK_LOG</string>
+</dict>
+</plist>
+EOF
+  launchd_load "$PEEK_PLIST" "$PEEK_LABEL"
+  echo "corner previews: $PEEK_LABEL (log $PEEK_LOG)"
+}
+
+cmd_uninstall() {
+  "$HUB" uninstall >/dev/null
+  launchctl bootout "gui/$(id -u)/$PEEK_LABEL" 2>/dev/null || true
+  rm -f "$PEEK_PLIST"
+  echo "removed com.anurag.ferry and $PEEK_LABEL"
+}
+
+agent_state() {
+  launchctl print "gui/$(id -u)/$1" 2>/dev/null | awk '/^\tstate =/ {print $3; exit}' | grep . || echo "not installed"
+}
+
+cmd_status() {
+  echo "hub:             $(agent_state com.anurag.ferry)"
+  echo "phone app:       $(hub_ctl status 2>&1)"
+  echo "corner previews: $(agent_state "$PEEK_LABEL")"
+  local st; st="$(sync_state)"
+  echo "screenshot sync: $st (Syncthing -> $SYNC_DIR)"
+  if command -v adb >/dev/null; then
+    local s; s="$(adb devices | awk 'NR>1 && $2=="device" {print $1; exit}')"
+    echo "adb:             ${s:-not connected (only needed for ferry app install)}"
+  fi
+}
+
+# --- Android app -----------------------------------------------------------------------------
+
+app_build() {
+  [[ -f "$PLATFORM_JAR" ]] || die "Android SDK missing: sdkmanager 'platforms;android-36.1' 'build-tools;36.1.0'"
+  export JAVA_HOME="$JDK" PATH="$JDK/bin:$PATH"
+  rm -rf "$BUILD/gen" "$BUILD/classes" "$BUILD/dex"
+  mkdir -p "$BUILD/gen" "$BUILD/classes" "$BUILD/dex" "$CONF"
+  local vcode=$(( $(date +%s) / 60 - 29000000 ))
+  "$BT/aapt2" compile --dir "$APP_SRC/res" -o "$BUILD/res.zip"
+  "$BT/aapt2" link -I "$PLATFORM_JAR" --manifest "$APP_SRC/AndroidManifest.xml" \
+    --min-sdk-version 30 --target-sdk-version 36 --version-code "$vcode" --version-name "1.$vcode" \
+    --java "$BUILD/gen" -o "$BUILD/base.apk" "$BUILD/res.zip"
+  javac -nowarn --release 17 -classpath "$PLATFORM_JAR" -d "$BUILD/classes" -Xlint:-options \
+    $(find "$APP_SRC/src" "$BUILD/gen" -name '*.java') 2>&1 | grep -v '^Note:' || true
+  [[ -n "$(find "$BUILD/classes" -name 'MainActivity.class')" ]] || die "javac failed"
+  "$BT/d8" --release --min-api 30 --lib "$PLATFORM_JAR" --output "$BUILD/dex" $(find "$BUILD/classes" -name '*.class')
+  cp "$BUILD/base.apk" "$BUILD/unsigned.apk"
+  (cd "$BUILD/dex" && zip -q -j "$BUILD/unsigned.apk" classes.dex)
+  "$BT/zipalign" -f -p 4 "$BUILD/unsigned.apk" "$BUILD/aligned.apk"
+  if [[ ! -f "$KEYSTORE" ]]; then
+    keytool -genkeypair -keystore "$KEYSTORE" -alias ferry -keyalg RSA -keysize 2048 -validity 20000 \
+      -dname "CN=Ferry" -storepass ferrykey -keypass ferrykey >/dev/null 2>&1
+    chmod 600 "$KEYSTORE"
+  fi
+  local alias; alias="$(keytool -list -keystore "$KEYSTORE" -storepass ferrykey 2>/dev/null | awk -F, '/PrivateKeyEntry/ {print $1; exit}')"
+  "$BT/apksigner" sign --ks "$KEYSTORE" --ks-pass pass:ferrykey --key-pass pass:ferrykey --ks-key-alias "$alias" \
+    --out "$BUILD/ferry.apk" "$BUILD/aligned.apk"
+  echo "$BUILD/ferry.apk"
+}
+
+app_install() {
+  app_build >/dev/null
+  local s; s="$(adb_serial)"
+  local a=(adb -s "$s")
+  # One-time migration from the old PhoneLink app.
+  if "${a[@]}" shell pm path "$OLD_PKG" 2>/dev/null | grep -q package:; then
+    "${a[@]}" shell pm uninstall "$OLD_PKG" >/dev/null && echo "removed the old PhoneLink app"
+  fi
+  "${a[@]}" install -r "$BUILD/ferry.apk" >/dev/null
+  echo "installed $("${a[@]}" shell dumpsys package $PKG | awk -F= '/versionName/ {print $2; exit}' | tr -d '\r')"
+
+  "${a[@]}" shell pm grant $PKG android.permission.READ_LOGS
+  "${a[@]}" shell pm grant $PKG android.permission.POST_NOTIFICATIONS
+  "${a[@]}" shell appops set $PKG SYSTEM_ALERT_WINDOW allow
+  "${a[@]}" shell appops set $PKG ACCESS_RESTRICTED_SETTINGS allow 2>/dev/null || true
+  "${a[@]}" shell dumpsys deviceidle whitelist +$PKG >/dev/null
+  local uid; uid="$("${a[@]}" shell dumpsys package $PKG | grep -m1 -o 'appId=[0-9]*' | cut -d= -f2)"
+  [[ -n "$uid" ]] && "${a[@]}" shell cmd netpolicy add restrict-background-whitelist "$uid" || true
+
+  # Accessibility service for live screenshots: drop the old app's entry, add ours.
+  local svc="$PKG/$PKG.ShotService" cur
+  cur="$("${a[@]}" shell settings get secure enabled_accessibility_services | tr -d '\r')"
+  [[ "$cur" == "null" ]] && cur=""
+  cur="$(tr ':' '\n' <<< "$cur" | grep -v -e "^$OLD_PKG/" -e "^$svc\$" -e '^$' | paste -sd: - || true)"
+  cur="${cur:+$cur:}$svc"
+  "${a[@]}" shell settings put secure enabled_accessibility_services "$cur"
+  "${a[@]}" shell settings put secure accessibility_enabled 1
+  "${a[@]}" shell cmd statusbar add-tile $PKG/.ClipTile >/dev/null 2>&1 || true
+
+  local host token
+  host="$(ifconfig | awk '$1 == "inet" && $2 ~ /^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\./ {print $2; exit}')"
+  [[ -n "$host" ]] || die "no Tailscale IP on this Mac"
+  [[ -f "$CONF/token" ]] || { mkdir -p "$CONF"; openssl rand -hex 32 > "$CONF/token"; chmod 600 "$CONF/token"; }
+  token="$(tr -d '\n' < "$CONF/token")"
+  "${a[@]}" shell am broadcast -a $PKG.CONFIGURE -n $PKG/.ConfigReceiver \
+    --es host "$host" --ei port $PORT --es token "$token" >/dev/null
+  "${a[@]}" shell am start -n $PKG/.MainActivity >/dev/null
+  echo "configured for $host:$PORT. On the phone, tap Allow if Android asks about device logs."
+}
+
+# --- adb -------------------------------------------------------------------------------------
+
+hotspot_addr() {
+  local gw; gw="$(route -n get default 2>/dev/null | awk '/gateway:/ {print $2}')"
+  [[ -n "$gw" ]] && echo "$gw:5555"
+}
+
+cmd_adb() {
+  command -v adb >/dev/null || die "adb not found (brew install --cask android-platform-tools)"
+  case "${1:-status}" in
+    connect) local s; s="$(adb_serial)"; echo "connected: $s ($(adb -s "$s" shell getprop ro.product.model | tr -d '\r'))" ;;
+    pair)
+      shift
+      local addr code
+      if [[ $# -eq 2 ]]; then addr="$1"; code="$2"
+      elif [[ $# -eq 1 ]]; then
+        code="$1"
+        for _ in 1 2 3 4 5; do
+          addr="$(adb mdns services 2>/dev/null | awk '/_adb-tls-pairing\._tcp/ {a=$NF} END {print a}')"
+          [[ -n "$addr" ]] && break; sleep 1
+        done
+        [[ -n "$addr" ]] || die "no phone advertising pairing; keep the 'Pair with pairing code' dialog open, or pass HOST:PORT CODE"
+      else die "usage: ferry adb pair [HOST:PORT] CODE (Wireless debugging > Pair device with pairing code)"
+      fi
+      adb pair "$addr" "$code"
+      cmd_adb connect ;;
+    tcpip)
+      local usb addr
+      usb="$(adb devices | awk 'NR>1 && $2=="device" && $1 !~ /:/ {print $1; exit}')"
+      [[ -n "$usb" ]] || die "no USB phone found. Plug it in, unlock it, and allow USB debugging."
+      adb -s "$usb" tcpip 5555; sleep 2
+      addr="$(hotspot_addr)"; [[ -n "$addr" ]] || die "no default gateway; is the Mac on the phone's hotspot?"
+      adb connect "$addr"; mkdir -p "$CONF"; echo "$addr" > "$CONF/adb_addr"
+      echo "You can unplug the cable now." ;;
+    status) adb devices -l; echo "mDNS:"; adb mdns services 2>/dev/null | sed 1d || true ;;
+    *) die "usage: ferry adb connect|pair|tcpip|status" ;;
+  esac
+}
+
+# --- main ------------------------------------------------------------------------------------
+
+case "${1:-}" in
+  shot) cmd_shot ;;
+  last) shift; cmd_last "$@" ;;
+  status) cmd_status ;;
+  setup) cmd_setup ;;
+  uninstall) cmd_uninstall ;;
+  app)
+    case "${2:-}" in
+      build) app_build ;;
+      install) app_install ;;
+      *) die "usage: ferry app build|install" ;;
+    esac ;;
+  logs)
+    case "${2:-hub}" in
+      hub) tail -n 30 -f "$HUB_LOG" ;;
+      peek) tail -n 30 -f "$PEEK_LOG" ;;
+      app) adb -s "$(adb_serial)" logcat -v time Ferry:V ClipboardService:V AndroidRuntime:E '*:S' ;;
+      *) die "usage: ferry logs [hub|peek|app]" ;;
+    esac ;;
+  peek)
+    peek_build
+    f="${2:-$(synced_files 1)}"
+    [[ -f "$f" ]] || die "no file to preview"
+    "$PEEK_BIN" --show "$f" ;;
+  adb) shift; cmd_adb "$@" ;;
+  ""|-h|--help|help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) die "unknown command: $1 (try ferry help)" ;;
+esac
