@@ -75,4 +75,24 @@ ferry logs app      # follow the app's logcat (needs adb)
 
 After editing the hub or peek, run `ferry setup`. After editing the app, run `ferry app install`.
 
+## Gotchas
+
+- **App build** (no Gradle): aapt2, javac (`--release 17` against the android-36.1 jar), d8,
+  zipalign, apksigner. Never delete `~/.config/ferry/release.keystore`; a new key forces an
+  uninstall on the phone.
+- **Log-access consent:** Android 13+ offers it only while the app is in the foreground. A logcat
+  started in the background silently sees only its own lines. MainActivity restarts the reader
+  until it sees a line from another pid; a reader the UI started gets 20 s before it may be
+  restarted. A background-start denial is cached for about a minute.
+- **Self-trigger loop:** the app's own denied clipboard reads log the same "Denying clipboard
+  access" line, so it reads only with focus and ignores hints within 1.5 s of its own reads.
+- **No accessibility trigger:** accessibility events don't reveal copies on a Pixel.
+- **Tailscale under launchd:** the Tailscale CLI doesn't return a usable IP there, so ferryd reads
+  the 100.64.0.0/10 address from `ifconfig`.
+- **Phone-side Syncthing config:** use the REST API, not the UI. In Syncthing-Fork, Import and
+  Export > Export Configuration writes `/sdcard/backups/syncthing/config.zip` (it holds the API key
+  and private keys; delete it afterwards). Then `adb forward tcp:18384 tcp:8384` and call
+  https://127.0.0.1:18384 with `X-API-Key`. `uiautomator dump` fails while the app shows sync
+  progress; tap by coordinates from a screencap.
+
 Tested on a Pixel 7 Pro with Android 17 and macOS 26.
