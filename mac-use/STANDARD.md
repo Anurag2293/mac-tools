@@ -13,7 +13,7 @@ Use the first option that can do the job:
 5. `find_text` (OCR), or `click` with `text`, for apps that draw their own UI.
 6. Raw `x,y` screenshot coordinates, as a last resort.
 
-Web pages belong to browser tools: Playwright MCP for real sites, and T3 Code's preview for local dev servers. Use `mac-use` for native apps and anything outside a browser.
+Web pages belong to browser tools: T3 Code's preview for any URL, and headless Playwright only when the preview isn't available. Never open a browser window on the desktop for a web page. Use `mac-use` for native apps and anything outside a browser.
 
 ## 2. The loop
 
