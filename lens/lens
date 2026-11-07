@@ -1,0 +1,124 @@
+#!/bin/bash
+# lens: translate everything on screen in place. See README.md.
+set -euo pipefail
+
+DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+SRC="$DIR/lens.swift"
+APP="$DIR/.build/Lens.app"
+BIN="$APP/Contents/MacOS/Lens"
+LABEL=com.anurag.lens
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+LOG="$HOME/Library/Logs/lens.log"
+
+die() { echo "lens: $*" >&2; exit 1; }
+
+build() {
+  if [[ -x "$BIN" && "$BIN" -nt "$SRC" && "$1" != force ]]; then return; fi
+  mkdir -p "$APP/Contents/MacOS"
+  cat > "$APP/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>$LABEL</string>
+  <key>CFBundleName</key><string>Lens</string>
+  <key>CFBundleExecutable</key><string>Lens</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>LSUIElement</key><true/>
+  <key>NSScreenCaptureUsageDescription</key><string>Lens reads the text on screen to translate it.</string>
+</dict>
+</plist>
+EOF
+  swiftc -O -swift-version 5 -o "$BIN" "$SRC"
+  codesign --force --sign - --identifier "$LABEL" "$APP" 2>/dev/null
+  echo "built $APP"
+}
+
+plist_env() {  # pass LENS_* from the current environment through to the agent
+  local v
+  for v in LENS_FROM LENS_TO LENS_HOTKEY LENS_ENGINE; do
+    [[ -n "${!v:-}" ]] && echo "    <key>$v</key><string>${!v}</string>"
+  done
+  return 0
+}
+
+cmd_setup() {
+  local before=""
+  [[ -x "$BIN" ]] && before="$(shasum "$BIN")"
+  build "${1:-}"
+  mkdir -p "$(dirname "$PLIST")" "$HOME/.local/bin"
+  ln -sf "$DIR/lens" "$HOME/.local/bin/lens"
+  cat > "$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$LABEL</string>
+  <key>ProgramArguments</key><array><string>$BIN</string></array>
+  <key>EnvironmentVariables</key>
+  <dict>
+$(plist_env)
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>LimitLoadToSessionType</key><string>Aqua</string>
+  <key>ProcessType</key><string>Interactive</string>
+  <key>StandardOutPath</key><string>$LOG</string>
+  <key>StandardErrorPath</key><string>$LOG</string>
+</dict>
+</plist>
+EOF
+  launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+  if [[ -n "$before" && "$before" != "$(shasum "$BIN")" ]]; then
+    # Ad-hoc signing ties permissions to this exact binary: clear the stale grants so macOS
+    # prompts again when the agent starts.
+    tccutil reset ScreenCapture "$LABEL" >/dev/null 2>&1 || true
+    tccutil reset ListenEvent "$LABEL" >/dev/null 2>&1 || true
+    echo "rebuilt: macOS will ask again for Screen Recording and Input Monitoring"
+  fi
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null && break
+    sleep 0.5
+  done
+  launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || die "launchctl bootstrap failed"
+  echo "agent: $LABEL (log $LOG)"
+  sleep 1; tail -n 1 "$LOG" 2>/dev/null || true
+}
+
+cmd_status() {
+  local st
+  st="$(launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | awk '/^\tstate =/ {print $3; exit}')"
+  echo "agent: ${st:-not installed}"
+  grep -E "hotkey" "$LOG" 2>/dev/null | tail -n 1 || true
+}
+
+case "${1:-toggle}" in
+  toggle|"") "$BIN" --toggle ;;
+  setup) cmd_setup "${2:-}" ;;
+  build) build force ;;
+  file) shift; build ""; "$BIN" --file "$@" ;;
+  status) cmd_status ;;
+  logs) tail -n 50 -f "$LOG" ;;
+  uninstall)
+    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+    rm -f "$PLIST" "$HOME/.local/bin/lens"
+    echo "removed $LABEL" ;;
+  help|-h|--help)
+    cat <<EOF
+lens: translate everything on screen in place (on-device OCR + Google Translate)
+
+  lens                 show or dismiss the overlay (same as double-tapping right cmd)
+  lens setup [force]   build Lens.app, install the launchd agent and ~/.local/bin/lens
+  lens build           rebuild Lens.app
+  lens file IMG [--out PNG]
+                       translate an image: print the blocks, optionally render the result
+  lens status | logs | uninstall
+
+Overlay: Esc, click, scroll or the hotkey dismisses; hold Option for the original; Cmd-C copies
+the translation. Settings (env at setup time): LENS_FROM=ja LENS_TO=en LENS_ENGINE=google|apple
+LENS_HOTKEY=double:rcmd (or double:rshift, ropt, ... or a chord like ctrl+opt+t)
+EOF
+    ;;
+  *) die "unknown command '$1' (lens help)" ;;
+esac

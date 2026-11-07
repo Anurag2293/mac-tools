@@ -6,6 +6,7 @@ its own README and install steps.
 | Tool | What it does |
 | --- | --- |
 | [ferry](ferry/) | Clipboard, files and screenshots between the Mac and an Android phone over Tailscale |
+| [lens](lens/) | Translate everything on screen in place (Japanese to English), Google Translate over on-device OCR |
 | [mac-use](mac-use/) | Local computer use for agents: MCP server and CLI for native Mac apps |
 
 ## Conventions
