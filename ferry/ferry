@@ -54,6 +54,8 @@ die() { echo "ferry: $*" >&2; exit 1; }
 copy_to_clipboard() {
   local f="$1" cls="«class PNGf»"
   [[ "$f" == *.jpg || "$f" == *.jpeg ]] && cls="JPEG picture"
+  f="${f//\\/\\\\}"
+  f="${f//\"/\\\"}"
   osascript -e "set the clipboard to (read (POSIX file \"$f\") as $cls)" >/dev/null 2>&1 || true
 }
 
