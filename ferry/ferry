@@ -345,7 +345,7 @@ cmd_adb() {
       usb="$(adb devices | awk 'NR>1 && $2=="device" && $1 !~ /:/ {print $1; exit}')"
       [[ -n "$usb" ]] || die "no USB phone found. Plug it in, unlock it, and allow USB debugging."
       adb -s "$usb" tcpip 5555; sleep 2
-      addr="$(hotspot_addr)"; [[ -n "$addr" ]] || die "no default gateway; is the Mac on the phone's hotspot?"
+      addr="$(hotspot_addr || true)"; [[ -n "$addr" ]] || die "no default gateway; is the Mac on the phone's hotspot?"
       adb connect "$addr"; mkdir -p "$CONF"; echo "$addr" > "$CONF/adb_addr"
       echo "You can unplug the cable now." ;;
     status) adb devices -l; echo "mDNS:"; adb mdns services 2>/dev/null | sed 1d || true ;;
