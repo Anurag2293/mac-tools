@@ -39,7 +39,7 @@ extension Dictionary where Key == String, Value == Any {
         return nil
     }
 
-    func int(_ key: String) -> Int? { double(key).map { Int($0) } }
+    func int(_ key: String) -> Int? { double(key).flatMap { Int(exactly: $0.rounded(.towardZero)) } }
 
     func bool(_ key: String) -> Bool? {
         if let b = self[key] as? Bool { return b }
