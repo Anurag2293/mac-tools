@@ -58,6 +58,21 @@ mac-use standard
 | `~/Library/Logs/mac-use/actions.jsonl` | Every action, with long text truncated |
 | `~/Library/Caches/mac-use/` | Latest screenshots |
 
+Setting `MAC_USE_HOME` makes mac-use use that directory in place of `~` for all of these paths. The tests rely on it.
+
+## Tests
+
+```sh
+./test.sh            # builds into .build-tests/, runs everything, exits non-zero on failure
+TEST_FILTER=safety ./test.sh   # only tests whose "suite / name" contains the text
+```
+
+`swiftc` builds the test runner from `Sources/` (without `main.swift`) and `Tests/`; there is no XCTest or SwiftPM. The run uses a scratch `MAC_USE_HOME` directory, so config, pause state, logs and caches never touch the real `~` files. The runner refuses to start if the paths are not redirected.
+
+Covered: Safety (deny and allow lists, config parsing, pause and failsafe, action log format), element list formatting, key chord parsing, argument validation and error messages of every tool that can fail before touching the system, the MCP JSON-RPC layer (in memory and over the built binary's stdio), CLI argument handling (`tools`, `standard`, usage, `call` errors), and that `Standard.swift` and `STANDARD.md` agree.
+
+Not covered, because they need the screen, apps or permissions: observing, screenshots and OCR, clicking, typing, scrolling, dragging, menus, `run_script`, `open_app`, `list_apps`, and `mac-use status|pause|resume`.
+
 ## Known limits
 
 - `observe` brings the app to the front. Computer use and the user share one screen.
