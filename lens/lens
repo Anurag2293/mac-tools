@@ -88,7 +88,7 @@ EOF
 
 cmd_status() {
   local st
-  st="$(launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | awk '/^\tstate =/ {print $3; exit}')"
+  st="$(launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | awk '/^\tstate =/ {print $3; exit}')" || true
   echo "agent: ${st:-not installed}"
   grep -E "hotkey" "$LOG" 2>/dev/null | tail -n 1 || true
 }
