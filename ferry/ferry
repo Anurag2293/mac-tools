@@ -31,6 +31,7 @@ CTL_SOCK="$CONF/ctl.sock"
 SHOTS_DIR="${FERRY_SHOTS_DIR:-$HOME/Pictures/Ferry}"
 SYNC_DIR="${FERRY_SYNC_DIR:-$HOME/Pictures/PhoneScreenshots}"
 SYNC_FOLDER_ID="pixel-screenshots"
+SYNCTHING_URL="${FERRY_SYNCTHING_URL:-https://127.0.0.1:8384}"
 SYNCTHING_CONFIG="$HOME/Library/Application Support/Syncthing/config.xml"
 PHONE_SHOT_DIRS=(/sdcard/Pictures/Screenshots /sdcard/DCIM/Screenshots)
 PEEK_LABEL="com.anurag.ferry-peek"
@@ -114,12 +115,12 @@ sync_state() {
   local key
   key="$(sed -n 's:.*<apikey>\(.*\)</apikey>.*:\1:p' "$SYNCTHING_CONFIG" 2>/dev/null | head -n 1)"
   [[ -n "$key" ]] || { echo unknown; return; }
-  python3 -I - "$key" "$SYNC_FOLDER_ID" <<'PY' 2>/dev/null || echo unknown
+  python3 -I - "$key" "$SYNC_FOLDER_ID" "$SYNCTHING_URL" <<'PY' 2>/dev/null || echo unknown
 import json, ssl, sys, urllib.request
-key, fid = sys.argv[1], sys.argv[2]
+key, fid, base = sys.argv[1], sys.argv[2], sys.argv[3]
 ctx = ssl._create_unverified_context()
 def get(path):
-    req = urllib.request.Request("https://127.0.0.1:8384" + path, headers={"X-API-Key": key})
+    req = urllib.request.Request(base + path, headers={"X-API-Key": key})
     return json.load(urllib.request.urlopen(req, context=ctx, timeout=3))
 peers = {d["deviceID"] for d in get(f"/rest/config/folders/{fid}")["devices"]}
 conns = get("/rest/system/connections")["connections"]
