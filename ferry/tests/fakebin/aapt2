@@ -1,0 +1,12 @@
+#!/bin/bash
+[ -n "${FERRY_TEST_LOG:-}" ] || { echo "fake aapt2 run outside the test sandbox" >&2; exit 99; }
+echo "aapt2 $*" >> "$FERRY_TEST_LOG"
+out=""
+for ((i = 1; i <= $#; i++)); do
+  if [ "${!i}" = "-o" ]; then j=$((i + 1)); out="${!j}"; fi
+done
+t="$(mktemp -d)"
+echo x > "$t/f"
+rm -f "$out"
+(cd "$t" && zip -q "$out" f)
+rm -rf "$t"

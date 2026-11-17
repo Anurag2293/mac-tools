@@ -1,0 +1,11 @@
+#!/bin/bash
+[ -n "${FERRY_TEST_LOG:-}" ] || { echo "fake launchctl run outside the test sandbox" >&2; exit 99; }
+S="$FERRY_TEST_STATE"
+echo "launchctl $*" >> "$FERRY_TEST_LOG"
+case "${1:-}" in
+  print) cat "$S/launchctl_print_${2##*/}" 2>/dev/null || exit 113 ;;
+  bootstrap)
+    n=$(cat "$S/bootstrap_failures" 2>/dev/null || echo 0)
+    if [ "$n" -gt 0 ]; then echo $((n - 1)) > "$S/bootstrap_failures"; exit 5; fi ;;
+esac
+exit 0

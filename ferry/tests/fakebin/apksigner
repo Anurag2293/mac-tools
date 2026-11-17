@@ -1,0 +1,9 @@
+#!/bin/bash
+[ -n "${FERRY_TEST_LOG:-}" ] || { echo "fake apksigner run outside the test sandbox" >&2; exit 99; }
+echo "apksigner $*" >> "$FERRY_TEST_LOG"
+out=""
+in="${@: -1}"
+for ((i = 1; i <= $#; i++)); do
+  if [ "${!i}" = "--out" ]; then j=$((i + 1)); out="${!j}"; fi
+done
+cp "$in" "$out"

@@ -1,0 +1,15 @@
+#!/bin/bash
+[ -n "${FERRY_TEST_LOG:-}" ] || { echo "fake javac run outside the test sandbox" >&2; exit 99; }
+echo "javac $*" >> "$FERRY_TEST_LOG"
+d=""
+for ((i = 1; i <= $#; i++)); do
+  if [ "${!i}" = "-d" ]; then j=$((i + 1)); d="${!j}"; fi
+done
+if [ -e "$FERRY_TEST_STATE/javac_fail" ]; then
+  echo "Main.java:1: error: boom" >&2
+  exit 1
+fi
+mkdir -p "$d/com/anurag/ferry"
+: > "$d/com/anurag/ferry/MainActivity.class"
+echo "Note: Some input files use unchecked operations." >&2
+exit 0

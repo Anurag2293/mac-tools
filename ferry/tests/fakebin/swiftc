@@ -1,0 +1,9 @@
+#!/bin/bash
+[ -n "${FERRY_TEST_LOG:-}" ] || { echo "fake swiftc run outside the test sandbox" >&2; exit 99; }
+echo "swiftc $*" >> "$FERRY_TEST_LOG"
+[ -e "$FERRY_TEST_STATE/swiftc_fail" ] && { echo "error: swiftc boom" >&2; exit 1; }
+out=""
+while [ $# -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done
+[ -n "$out" ] || exit 1
+printf '#!/bin/bash\necho "peek $*" >> "$FERRY_TEST_LOG"\n' > "$out"
+chmod +x "$out"

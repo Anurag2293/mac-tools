@@ -1,0 +1,30 @@
+#!/bin/bash
+[ -n "${FERRY_TEST_LOG:-}" ] || { echo "fake adb run outside the test sandbox" >&2; exit 99; }
+S="$FERRY_TEST_STATE"
+echo "adb $*" >> "$FERRY_TEST_LOG"
+if [ "${1:-}" = "-s" ]; then shift 2; fi
+sub="${1:-}"
+[ -e "$S/adb_fail_$sub" ] && { cat "$S/adb_fail_$sub" 2>/dev/null; exit 1; }
+case "$sub" in
+  devices) cat "$S/adb_devices" 2>/dev/null || echo "List of devices attached" ;;
+  mdns) cat "$S/adb_mdns" 2>/dev/null || echo "List of discovered mdns services" ;;
+  pair|connect|tcpip|install|forward|logcat) cat "$S/adb_out_$sub" 2>/dev/null || true ;;
+  exec-out) cat "$S/screencap" 2>/dev/null || true ;;
+  pull)
+    src="${2/#\/sdcard/$S/sdcard}"
+    [ -f "$src" ] && cp "$src" "$3" || exit 1 ;;
+  shell)
+    shift
+    cmd="$*"
+    case "$cmd" in
+      ls*) bash -c "${cmd//\/sdcard/$S/sdcard}" ;;
+      "pm path "*) [ -e "$S/old_pkg" ] && echo "package:/data/app/old/base.apk" || true ;;
+      "pm uninstall "*|"pm grant "*|"appops "*|"am "*|"cmd "*|"settings put "*) ;;
+      "settings get secure enabled_accessibility_services") cat "$S/a11y" 2>/dev/null || echo null ;;
+      "dumpsys package "*) printf '    versionName=1.2345\r\n    appId=10234\r\n' ;;
+      "dumpsys deviceidle "*) ;;
+      "getprop ro.product.model") printf 'Pixel 7 Pro\r\n' ;;
+      *) ;;
+    esac ;;
+esac
+exit 0

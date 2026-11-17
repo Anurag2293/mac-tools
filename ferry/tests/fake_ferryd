@@ -1,0 +1,11 @@
+#!/bin/bash
+[ -n "${FERRY_TEST_LOG:-}" ] || { echo "fake ferryd run outside the test sandbox" >&2; exit 99; }
+echo "ferryd $*" >> "$FERRY_TEST_LOG"
+case "${1:-}" in
+  install) echo "installed" ;;
+  uninstall) echo "uninstalled" ;;
+  adb-connect)
+    [ -s "$FERRY_TEST_STATE/hub_serial" ] || exit 1
+    cat "$FERRY_TEST_STATE/hub_serial" ;;
+esac
+exit 0

@@ -1,0 +1,4 @@
+#!/bin/bash
+[ -n "${FERRY_TEST_LOG:-}" ] || { echo "fake route run outside the test sandbox" >&2; exit 99; }
+echo "route $*" >> "$FERRY_TEST_LOG"
+cat "$FERRY_TEST_STATE/route" 2>/dev/null || exit 1

@@ -1,0 +1,3 @@
+#!/bin/bash
+[ -n "${FERRY_TEST_LOG:-}" ] || { echo "fake ifconfig run outside the test sandbox" >&2; exit 99; }
+cat "$FERRY_TEST_STATE/ifconfig" 2>/dev/null || true

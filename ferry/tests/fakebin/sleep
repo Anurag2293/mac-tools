@@ -1,0 +1,5 @@
+#!/bin/bash
+[ -n "${FERRY_TEST_LOG:-}" ] || { echo "fake sleep run outside the test sandbox" >&2; exit 99; }
+echo "sleep $*" >> "$FERRY_TEST_LOG"
+[ -x "$FERRY_TEST_STATE/on_sleep" ] && "$FERRY_TEST_STATE/on_sleep"
+exit 0

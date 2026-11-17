@@ -1,0 +1,6 @@
+#!/bin/bash
+[ -n "${FERRY_TEST_LOG:-}" ] || { echo "fake d8 run outside the test sandbox" >&2; exit 99; }
+echo "d8 $*" >> "$FERRY_TEST_LOG"
+for ((i = 1; i <= $#; i++)); do
+  if [ "${!i}" = "--output" ]; then j=$((i + 1)); echo dex > "${!j}/classes.dex"; fi
+done

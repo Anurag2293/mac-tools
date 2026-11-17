@@ -1,0 +1,3 @@
+#!/bin/bash
+[ -n "${FERRY_TEST_LOG:-}" ] || { echo "fake tail run outside the test sandbox" >&2; exit 99; }
+echo "tail $*" >> "$FERRY_TEST_LOG"
