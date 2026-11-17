@@ -96,3 +96,22 @@ After editing the hub or peek, run `ferry setup`. After editing the app, run `fe
   progress; tap by coordinates from a screencap.
 
 Tested on a Pixel 7 Pro with Android 17 and macOS 26.
+
+## Tests
+
+```sh
+ferry/test.sh
+```
+
+One command runs everything and exits non-zero on any failure; it prints passed, failed and skipped
+per group and in total. Nothing needs the phone, the Android SDK or a running hub:
+
+- `tests/test_cli_*.sh`: the `ferry` script in a sandbox with fake adb, launchctl, osascript, swiftc
+  and the SDK tools first on PATH, a temporary HOME, and a fake control-socket hub and Syncthing.
+- `tests/test_hub_*.py`: `hub/ferryd` imported under `unittest` (stdlib only) with a temporary
+  config directory and loopback sockets; never port 47821 or `~/.config/ferry`.
+- `tests/run_java.sh`: `Frame` and `LogLine` compiled with a stand-in `org.json` on a plain JDK.
+  Skipped with a message when `javac` or `java` is missing.
+
+Not covered: `peek/peek.swift` (AppKit views, no separable logic), the Android classes that need
+the Android SDK (`Prefs`, services, activities), the real hub under launchd, adb and the phone.
