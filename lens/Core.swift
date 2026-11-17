@@ -91,8 +91,8 @@ func endsSentence(_ s: String) -> Bool {
 }
 
 func startsBullet(_ s: String) -> Bool {
-    guard let c = s.trimmingCharacters(in: .whitespaces).first else { return false }
-    return "•・●○■□◆◇▪︎-–*※★→".contains(c)
+    guard let u = s.trimmingCharacters(in: .whitespaces).unicodeScalars.first else { return false }
+    return "•・●○■□◆◇\u{25AA}-–*※★→".unicodeScalars.contains(u)
 }
 
 /// Groups OCR lines into paragraphs: lines stacked closely, left-aligned and of similar height
