@@ -44,7 +44,11 @@ sandbox_new() {
 
 sandbox_clean() {
   local p
-  while read -r p; do [[ -n "$p" ]] && kill "$p" 2>/dev/null; done < "$CHILD_PIDS_FILE"
+  while read -r p; do
+    [[ -n "$p" ]] || continue
+    pkill -P "$p" 2>/dev/null
+    kill "$p" 2>/dev/null
+  done < "$CHILD_PIDS_FILE"
   rm -rf "$T"
 }
 
