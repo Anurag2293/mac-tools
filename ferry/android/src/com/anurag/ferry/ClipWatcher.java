@@ -68,7 +68,7 @@ final class ClipWatcher {
     }
 
     private void run() {
-        String needle = "clipboard access to " + svc.getPackageName();
+        String pkg = svc.getPackageName();
         while (on) {
             verified = false;
             svc.watcherStateChanged();
@@ -82,12 +82,12 @@ final class ClipWatcher {
                 try (BufferedReader r = new BufferedReader(new InputStreamReader(proc.getInputStream()))) {
                     String line;
                     while (on && (line = r.readLine()) != null) {
-                        if (!verified && fromOtherProcess(line)) {
+                        if (!verified && LogLine.fromOtherProcess(line, myPid)) {
                             verified = true;
                             Log.i(LinkService.TAG, "log access approved; automatic clipboard is on");
                             svc.watcherStateChanged();
                         }
-                        if (line.toLowerCase().contains(needle)) svc.onClipChangedHint("logcat");
+                        if (LogLine.isClipboardDenial(line, pkg)) svc.onClipChangedHint("logcat");
                     }
                 }
             } catch (IOException e) {
@@ -98,17 +98,6 @@ final class ClipWatcher {
                     try { kick.wait(5000); } catch (InterruptedException ignored) { }
                 }
             }
-        }
-    }
-
-    // "-v brief" lines look like "E/ClipboardService( 1560): ...".
-    private boolean fromOtherProcess(String line) {
-        int a = line.indexOf('('), b = line.indexOf(')', a + 1);
-        if (a < 0 || b < 0) return false;
-        try {
-            return Integer.parseInt(line.substring(a + 1, b).trim()) != myPid;
-        } catch (NumberFormatException e) {
-            return false;
         }
     }
 }
