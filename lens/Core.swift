@@ -394,6 +394,7 @@ final class Translator {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
+                try Task.checkCancellation()
                 log("\(error); falling back to on-device translation")
             }
         }
