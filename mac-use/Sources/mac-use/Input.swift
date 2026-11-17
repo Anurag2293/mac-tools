@@ -101,7 +101,9 @@ enum Input {
     }
 
     static func parseSequence(_ keys: String) throws -> [Chord] {
-        try keys.split(whereSeparator: \.isWhitespace).map { try parse(String($0)) }
+        let chords = try keys.split(whereSeparator: \.isWhitespace).map { try parse(String($0)) }
+        guard !chords.isEmpty else { throw ToolError("'keys' is required.") }
+        return chords
     }
 
     static func key(_ code: CGKeyCode, down: Bool, flags: CGEventFlags) {
