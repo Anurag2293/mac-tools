@@ -299,17 +299,23 @@ func htmlEscape(_ s: String) -> String {
 
 func htmlUnescape(_ s: String) -> String {
     guard s.contains("&") else { return s }
-    let named = ["&lt;": "<", "&gt;": ">", "&quot;": "\"", "&apos;": "'", "&nbsp;": " "]
-    var out = s
-    for (k, v) in named { out = out.replacingOccurrences(of: k, with: v) }
-    let re = try! NSRegularExpression(pattern: "&#(x?)([0-9a-fA-F]+);")
-    for m in re.matches(in: out, range: NSRange(out.startIndex..., in: out)).reversed() {
-        let hex = (out as NSString).substring(with: m.range(at: 1)) == "x"
-        let num = (out as NSString).substring(with: m.range(at: 2))
-        if let v = UInt32(num, radix: hex ? 16 : 10), let u = Unicode.Scalar(v),
-           let r = Range(m.range, in: out) { out.replaceSubrange(r, with: String(u)) }
+    let named = ["lt": "<", "gt": ">", "amp": "&", "quot": "\"", "apos": "'", "nbsp": " "]
+    let re = try! NSRegularExpression(pattern: "&(?:#(x?)([0-9a-fA-F]+)|([a-z]+));")
+    let ns = s as NSString
+    var out = "", last = 0
+    for m in re.matches(in: s, range: NSRange(location: 0, length: ns.length)) {
+        out += ns.substring(with: NSRange(location: last, length: m.range.location - last))
+        var decoded: String?
+        if m.range(at: 3).location != NSNotFound {
+            decoded = named[ns.substring(with: m.range(at: 3))]
+        } else if let v = UInt32(ns.substring(with: m.range(at: 2)), radix: m.range(at: 1).length == 1 ? 16 : 10),
+                  let u = Unicode.Scalar(v) {
+            decoded = String(u)
+        }
+        out += decoded ?? ns.substring(with: m.range)
+        last = m.range.location + m.range.length
     }
-    return out.replacingOccurrences(of: "&amp;", with: "&")
+    return out + ns.substring(from: last)
 }
 
 /// Index ranges of at most 100 texts / ~8000 characters per request.
