@@ -1,4 +1,12 @@
 #!/bin/bash
 [ -n "${FERRY_TEST_LOG:-}" ] || { echo "fake osascript run outside the test sandbox" >&2; exit 99; }
+S="$FERRY_TEST_STATE"
 echo "osascript $*" >> "$FERRY_TEST_LOG"
+script="$*"
+path="$(sed -n 's/.*POSIX file "\([^"]*\)".*/\1/p' <<< "$script" | head -n 1)"
+if [[ "$script" == *"open for access"* ]]; then
+  if [ -e "$S/clip_image" ]; then cp "$S/clip_image" "$path"; echo ok; else echo none; fi
+elif [[ "$script" == *"set the clipboard to (read"* && -n "$path" && -f "$path" ]]; then
+  cp "$path" "$S/set_image_data"
+fi
 exit 0

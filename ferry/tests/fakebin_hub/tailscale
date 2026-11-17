@@ -1,0 +1,5 @@
+#!/bin/bash
+[ -n "${FERRY_TEST_LOG:-}" ] || { echo "fake tailscale run outside the test sandbox" >&2; exit 99; }
+echo "tailscale $*" >> "$FERRY_TEST_LOG"
+cat "$FERRY_TEST_STATE/tailscale_json" 2>/dev/null
+exit "$(cat "$FERRY_TEST_STATE/tailscale_rc" 2>/dev/null || echo 0)"

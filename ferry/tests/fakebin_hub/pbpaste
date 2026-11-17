@@ -1,0 +1,4 @@
+#!/bin/bash
+[ -n "${FERRY_TEST_LOG:-}" ] || { echo "fake pbpaste run outside the test sandbox" >&2; exit 99; }
+cat "$FERRY_TEST_STATE/clipboard" 2>/dev/null
+exit 0

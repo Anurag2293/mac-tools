@@ -18,6 +18,8 @@ case "$sub" in
     cmd="$*"
     case "$cmd" in
       ls*) bash -c "${cmd//\/sdcard/$S/sdcard}" ;;
+      "stat -c %s "*) cat "$S/device_jar_size" 2>/dev/null || true ;;
+      CLASSPATH=*) [ -e "$S/server_exit" ] && exit 0; exec /bin/sleep 60 ;;
       "pm path "*) [ -e "$S/old_pkg" ] && echo "package:/data/app/old/base.apk" || true ;;
       "pm uninstall "*|"pm grant "*|"appops "*|"am "*|"cmd "*|"settings put "*) ;;
       "settings get secure enabled_accessibility_services") cat "$S/a11y" 2>/dev/null || echo null ;;

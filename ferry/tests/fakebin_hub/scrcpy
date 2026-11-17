@@ -1,0 +1,7 @@
+#!/bin/bash
+[ -n "${FERRY_TEST_LOG:-}" ] || { echo "fake scrcpy run outside the test sandbox" >&2; exit 99; }
+echo "scrcpy $*" >> "$FERRY_TEST_LOG"
+if [ "${1:-}" = "--version" ]; then
+  cat "$FERRY_TEST_STATE/scrcpy_version" 2>/dev/null || echo "scrcpy 3.3.1 <https://github.com/Genymobile/scrcpy>"
+fi
+exit 0
