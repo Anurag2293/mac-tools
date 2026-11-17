@@ -2,7 +2,8 @@ import AppKit
 import CoreGraphics
 
 enum Paths {
-    static let home = FileManager.default.homeDirectoryForCurrentUser
+    static let home = ProcessInfo.processInfo.environment["MAC_USE_HOME"].map { URL(fileURLWithPath: $0) }
+        ?? FileManager.default.homeDirectoryForCurrentUser
     static let support = home.appendingPathComponent("Library/Application Support/mac-use")
     static let logs = home.appendingPathComponent("Library/Logs/mac-use")
     static let caches = home.appendingPathComponent("Library/Caches/mac-use")
@@ -50,19 +51,22 @@ struct Config {
 }
 
 enum Safety {
-    static func matches(_ app: NSRunningApplication, _ list: [String]) -> Bool {
-        let ids = [app.bundleIdentifier, app.localizedName].compactMap { $0?.lowercased() }
+    static func matches(names: [String?], _ list: [String]) -> Bool {
+        let ids = names.compactMap { $0?.lowercased() }
         return list.contains { ids.contains($0.lowercased()) }
     }
 
     static func checkApp(_ app: NSRunningApplication?) throws {
         guard let app else { return }
+        try check(names: [app.bundleIdentifier, app.localizedName], display: Apps.name(app))
+    }
+
+    static func check(names: [String?], display name: String) throws {
         let config = Config.load()
-        let name = Apps.name(app)
-        if matches(app, config.denyApps) {
+        if matches(names: names, config.denyApps) {
             throw ToolError("mac-use is not allowed to touch \(name) (deny_apps in \(Paths.config.path)). Ask the user to do this step.")
         }
-        if !config.allowApps.isEmpty && !matches(app, config.allowApps) {
+        if !config.allowApps.isEmpty && !matches(names: names, config.allowApps) {
             throw ToolError("\(name) is not in allow_apps (\(Paths.config.path)). Ask the user to do this step or to allow the app.")
         }
     }
@@ -91,8 +95,11 @@ enum Safety {
     }
 
     /// Moving the mouse into the top-left corner of the main display pauses mac-use.
+    static var mouseLocation: () -> CGPoint? = { CGEvent(source: nil)?.location }
+    static var frontName: () -> String = { Apps.frontmostName() }
+
     static func failsafeTripped() -> Bool {
-        if let loc = CGEvent(source: nil)?.location, loc.x <= 2, loc.y <= 2 {
+        if let loc = mouseLocation(), loc.x <= 2, loc.y <= 2 {
             if !isPaused { pause("failsafe: mouse moved to the top-left corner at \(timestamp())") }
             return true
         }
@@ -118,7 +125,7 @@ enum Safety {
         }
         let entry: [String: Any] = [
             "ts": timestamp(), "tool": tool, "args": safeArgs,
-            "front": Apps.frontmostName(), "result": String(result.prefix(300)),
+            "front": frontName(), "result": String(result.prefix(300)),
         ]
         guard JSONSerialization.isValidJSONObject(entry),
               let data = try? JSONSerialization.data(withJSONObject: entry, options: [.sortedKeys]) else { return }

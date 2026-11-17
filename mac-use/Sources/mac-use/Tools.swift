@@ -31,10 +31,12 @@ private let yArg = num("Y in pixels of the latest screenshot.")
 enum Tools {
     static func find(_ name: String) -> Tool? { all.first { $0.name == name } }
 
+    static var isTrusted: () -> Bool = { AXIsProcessTrusted() }
+
     static func call(_ name: String, _ args: [String: Any]) -> (content: [Content], isError: Bool) {
         guard let tool = find(name) else { return ([.text("Unknown tool '\(name)'.")], true) }
         do {
-            if name != "run_script" && name != "list_apps" && !AXIsProcessTrusted() {
+            if name != "run_script" && name != "list_apps" && !isTrusted() {
                 throw ToolError("Accessibility permission is missing for the app running this agent. Grant it in System Settings > Privacy & Security > Accessibility, then restart the agent.")
             }
             if name != "list_apps" { try Safety.checkNotPaused() }
@@ -271,7 +273,7 @@ enum Tools {
         required: ["keys"]
     ) { args in
         guard let keys = args.string("keys") else { throw ToolError("'keys' is required.") }
-        let chords = try keys.split(whereSeparator: \.isWhitespace).map { try Input.parse(String($0)) }
+        let chords = try Input.parseSequence(keys)
         if let query = args.string("app") {
             let app = try Apps.resolve(query)
             try Safety.checkApp(app)

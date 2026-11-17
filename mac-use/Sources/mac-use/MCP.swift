@@ -2,17 +2,25 @@ import Foundation
 
 /// Minimal MCP server over stdio: newline-delimited JSON-RPC 2.0, tools only.
 final class MCPServer {
+    private let output: (Data) -> Void
+
+    init(output: @escaping (Data) -> Void = { FileHandle.standardOutput.write($0) }) {
+        self.output = output
+    }
+
     func run() {
-        while let line = readLine() {
-            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty { continue }
-            guard let msg = (try? JSONSerialization.jsonObject(with: Data(trimmed.utf8))) as? [String: Any] else {
-                send(["jsonrpc": "2.0", "id": NSNull(), "error": ["code": -32700, "message": "Parse error"]])
-                continue
-            }
-            handle(msg)
-        }
+        while let line = readLine() { handleLine(line) }
         exit(0)
+    }
+
+    func handleLine(_ line: String) {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return }
+        guard let msg = (try? JSONSerialization.jsonObject(with: Data(trimmed.utf8))) as? [String: Any] else {
+            send(["jsonrpc": "2.0", "id": NSNull(), "error": ["code": -32700, "message": "Parse error"]])
+            return
+        }
+        handle(msg)
     }
 
     func handle(_ msg: [String: Any]) {
@@ -52,6 +60,6 @@ final class MCPServer {
 
     func send(_ obj: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.withoutEscapingSlashes]) else { return }
-        FileHandle.standardOutput.write(data + Data("\n".utf8))
+        output(data + Data("\n".utf8))
     }
 }

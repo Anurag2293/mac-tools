@@ -100,6 +100,10 @@ enum Input {
         return Chord(mods: mods, key: code)
     }
 
+    static func parseSequence(_ keys: String) throws -> [Chord] {
+        try keys.split(whereSeparator: \.isWhitespace).map { try parse(String($0)) }
+    }
+
     static func key(_ code: CGKeyCode, down: Bool, flags: CGEventFlags) {
         let e = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: down)
         e?.flags = flags
