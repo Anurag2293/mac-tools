@@ -477,7 +477,9 @@ func parseHotkey(_ spec: String) -> (key: UInt32, mods: UInt32)? {
         case "opt", "option", "alt": mods |= optionKey
         case "cmd", "command": mods |= cmdKey
         case "shift": mods |= shiftKey
-        default: key = keys[part]
+        default:
+            guard let k = keys[part] else { return nil }
+            key = k
         }
     }
     guard let key else { return nil }
