@@ -193,9 +193,9 @@ class ReadFrame(ProtocolCase):
         self.feed(raw_frame({"t": "file", "size": 2.9}, b"ab"))
         self.assertEqual(self.read()[1], b"ab")
 
-    def test_size_not_a_number_raises_value_error(self):
+    def test_size_not_a_number_is_a_connection_error(self):
         self.feed(raw_frame({"t": "file", "size": "lots"}))
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ConnectionError, "bad data size"):
             self.read()
 
     def test_malformed_headers_surface_as_connection_or_value_errors(self):

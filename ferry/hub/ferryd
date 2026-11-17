@@ -341,7 +341,12 @@ def read_frame(sock):
     if not 0 < n <= (4 << 20):
         raise ConnectionError(f"bad header length {n}")
     hdr = json.loads(recv_exact(sock, n))
-    size = int(hdr.get("size", 0))
+    if not isinstance(hdr, dict):
+        raise ConnectionError("bad header")
+    try:
+        size = int(hdr.get("size", 0))
+    except (TypeError, ValueError, OverflowError):
+        raise ConnectionError("bad data size")
     if not 0 <= size <= MAX_FRAME_DATA:
         raise ConnectionError(f"bad data size {size}")
     return hdr, (recv_exact(sock, size) if size else None)
