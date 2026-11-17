@@ -508,11 +508,13 @@ def tailscale_ip():
 
 
 def link_token():
-    if not TOKEN_FILE.exists():
+    token = TOKEN_FILE.read_text().strip() if TOKEN_FILE.exists() else ""
+    if not token:
         LINK_DIR.mkdir(parents=True, exist_ok=True)
-        TOKEN_FILE.write_text(uuid.uuid4().hex + uuid.uuid4().hex + "\n")
+        token = uuid.uuid4().hex + uuid.uuid4().hex
+        TOKEN_FILE.write_text(token + "\n")
         TOKEN_FILE.chmod(0o600)
-    return TOKEN_FILE.read_text().strip()
+    return token
 
 
 def unique_download(name):
