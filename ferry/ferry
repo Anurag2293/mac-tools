@@ -78,7 +78,12 @@ if not line.startswith("ok"):
     print(line.removeprefix("err "), file=sys.stderr)
     sys.exit(1)
 if cmd == "shot":
-    open(sys.argv[3], "wb").write(f.read(int(line.split()[1])))
+    size = int(line.split()[1])
+    data = f.read(size)
+    if len(data) != size:
+        print("hub closed the connection mid-screenshot", file=sys.stderr)
+        sys.exit(1)
+    open(sys.argv[3], "wb").write(data)
 else:
     print(line.removeprefix("ok ").strip())
 PY
