@@ -218,7 +218,7 @@ func sampleColors(_ r: CGRect, _ px: Pixels) -> (bg: SIMD3<Double>, fg: SIMD3<Do
     }
     inside.sort { $0.0 > $1.0 }
     let top = inside.prefix(max(1, inside.count / 12))
-    var fg = top.reduce(SIMD3<Double>(0, 0, 0)) { $0 + $1.1 } / Double(top.count)
+    var fg = top.isEmpty ? bg : top.reduce(SIMD3<Double>(0, 0, 0)) { $0 + $1.1 } / Double(top.count)
     if abs(luminance(fg) - luminance(bg)) < 0.35 {
         fg = luminance(bg) > 0.5 ? SIMD3(0, 0, 0) : SIMD3(1, 1, 1)
     }
