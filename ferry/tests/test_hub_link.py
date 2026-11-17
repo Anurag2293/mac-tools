@@ -50,11 +50,15 @@ class LinkCase(HubTestCase):
     def _close_all(self):
         for s in self.sockets:
             try:
+                s.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
                 s.close()
             except OSError:
                 pass
         for t in self.threads:
-            t.join(3)
+            t.join(0.3)
         self.assertEqual(self.errors, [], "uncaught exceptions in link threads")
 
     def connect(self, token="tok", addr=("100.1.1.1", 5555), hello=None):

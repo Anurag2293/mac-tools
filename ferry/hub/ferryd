@@ -574,12 +574,12 @@ class Link:
             srv.close()
 
     def _handle(self, conn, addr, token):
-        phone_ip = TAILNET_HOST_FILE.read_text().strip() if TAILNET_HOST_FILE.exists() else ""
-        if phone_ip and addr[0] != phone_ip:
-            log(f"link: rejected connection from {addr[0]} (expected {phone_ip})")
-            conn.close()
-            return
         try:
+            phone_ip = TAILNET_HOST_FILE.read_text().strip() if TAILNET_HOST_FILE.exists() else ""
+            if phone_ip and addr[0] != phone_ip:
+                log(f"link: rejected connection from {addr[0]} (expected {phone_ip})")
+                conn.close()
+                return
             conn.settimeout(15)
             hdr, _ = read_frame(conn)
             if hdr.get("t") != "hello" or not hmac.compare_digest(str(hdr.get("token", "")), token):
@@ -601,7 +601,7 @@ class Link:
             while True:
                 hdr, data = read_frame(conn)
                 self._dispatch(hdr, data)
-        except (OSError, ConnectionError, ValueError) as e:
+        except Exception as e:
             with self.lock:
                 mine = self.conn is conn
                 if mine:
