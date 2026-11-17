@@ -79,3 +79,27 @@ request handling, cache, fitting, double-tap detector) are built together with `
    text on the same row.
 
 Log: `~/Library/Logs/lens.log`.
+
+## Tests
+
+```sh
+./test.sh          # builds .build/tests/lens-tests with swiftc, runs it, then the wrapper tests
+```
+
+Prints a summary for each part and exits non-zero on any failure. It needs no permissions and
+never touches the screen, the event tap, the network or the installed agent. SwiftPM and XCTest
+are not used (they do not work with this Mac's Command Line Tools), so `tests/Harness.swift` is a
+small assertion harness and `tests/main.swift` runs the suites.
+
+- `Core.swift` logic: the double-tap detector (hold and gap timing, other keys, modifiers, left
+  versus right), `LENS_HOTKEY` parsing, OCR line grouping and joining, the "already English"
+  filter, color sampling, block building and ordering, coordinate conversion, fitting and
+  painting into an in-memory bitmap, HTML escaping, the translateHtml request and response
+  (hostile and malformed bodies included), and the translation cache with the Google to
+  on-device fallback. Google is replaced by a fake transport, Apple translation by a fake.
+- Vision runs on text rendered into a bitmap (no Screen Recording involved); those tests skip
+  themselves if Vision reads nothing.
+- `tests/wrapper.sh` runs a copy of the `lens` script with a temporary `HOME` and fake
+  `launchctl`, `swiftc`, `codesign`, `tccutil`, `open`, `sleep` and `tail` first on `PATH`.
+- Not covered (needs hardware, permissions or the network): the real event tap, ScreenCaptureKit
+  capture, the overlay and HUD windows, Apple's Translation framework, and the Google endpoint.
