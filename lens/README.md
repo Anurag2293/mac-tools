@@ -59,7 +59,9 @@ trigger it.
 
 ## How it works
 
-`lens.swift` is a single AppKit file, built with `swiftc` into an `LSUIElement` app bundle.
+`main.swift` (AppKit app, overlay, event tap) and `Core.swift` (pure logic: grouping, colors, Google
+request handling, cache, fitting, double-tap detector) are built together with `swiftc` into an
+`LSUIElement` app bundle.
 
 1. ScreenCaptureKit captures the display under the pointer at full resolution.
 2. `VNRecognizeTextRequest` (accurate, ja + en) returns text lines with bounding boxes.

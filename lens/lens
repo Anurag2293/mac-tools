@@ -3,7 +3,7 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-SRC="$DIR/lens.swift"
+SRCS=("$DIR/Core.swift" "$DIR/main.swift")
 APP="$DIR/.build/Lens.app"
 BIN="$APP/Contents/MacOS/Lens"
 LABEL=com.anurag.lens
@@ -13,7 +13,7 @@ LOG="$HOME/Library/Logs/lens.log"
 die() { echo "lens: $*" >&2; exit 1; }
 
 build() {
-  if [[ -x "$BIN" && "$BIN" -nt "$SRC" && "$1" != force ]]; then return; fi
+  if [[ -x "$BIN" && "$1" != force && -z "$(find "${SRCS[@]}" -newer "$BIN")" ]]; then return; fi
   mkdir -p "$APP/Contents/MacOS"
   cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -30,7 +30,7 @@ build() {
 </dict>
 </plist>
 EOF
-  swiftc -O -swift-version 5 -o "$BIN" "$SRC"
+  swiftc -O -swift-version 5 -o "$BIN" "${SRCS[@]}"
   codesign --force --sign - --identifier "$LABEL" "$APP" 2>/dev/null
   echo "built $APP"
 }
