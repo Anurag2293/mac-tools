@@ -121,7 +121,7 @@ class UniqueDownload(HubTestCase):
 
     def test_overlong_name_raises_an_os_error_the_link_handler_catches(self):
         with self.assertRaises(OSError):
-            ferryd.unique_download("a" * 300 + ".txt")
+            ferryd.unique_download("a" * 300 + ".txt").write_bytes(b"x")
 
     def test_nul_byte_in_name_raises_a_value_error_the_link_handler_catches(self):
         with self.assertRaises(ValueError):
@@ -391,7 +391,11 @@ class ScanTailnet(HubTestCase):
         srv.listen(8)
         self.addCleanup(srv.close)
         port = srv.getsockname()[1]
-        with mock.patch.object(ferryd, "SCAN_PORTS", range(port - 2, port + 3)):
+        closed = socket.socket()
+        closed.bind(("127.0.0.1", 0))
+        closed_port = closed.getsockname()[1]
+        closed.close()
+        with mock.patch.object(ferryd, "SCAN_PORTS", [closed_port, port]):
             found = ferryd.scan_open_ports("127.0.0.1")
         self.assertEqual(found, [port])
 

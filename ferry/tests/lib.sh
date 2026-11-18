@@ -145,8 +145,9 @@ run_tests() {
       FAILED_FLAG=""
       sandbox_new
       trap 'sandbox_clean' EXIT
-      "$fn"
-      [[ -z "$FAILED_FLAG" ]]
+      fn_rc=0
+      "$fn" || fn_rc=$?
+      [[ "$fn_rc" -eq 0 && -z "$FAILED_FLAG" ]]
     ); then
       passed=$((passed + 1))
     else
