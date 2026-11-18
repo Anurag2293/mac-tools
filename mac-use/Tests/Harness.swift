@@ -126,7 +126,12 @@ enum Env {
             fputs("MAC_USE_HOME must point to a scratch directory. Run mac-use/test.sh.\n", stderr)
             exit(3)
         }
-        return URL(fileURLWithPath: raw).resolvingSymlinksInPath()
+        let url = URL(fileURLWithPath: raw).resolvingSymlinksInPath()
+        guard url.lastPathComponent.hasPrefix("mac-use-tests.") else {
+            fputs("MAC_USE_HOME must be a scratch directory named mac-use-tests.*. Run mac-use/test.sh.\n", stderr)
+            exit(3)
+        }
+        return url
     }()
 
     static func assertIsolated() {
