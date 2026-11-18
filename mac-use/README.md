@@ -58,7 +58,7 @@ mac-use standard
 | `~/Library/Logs/mac-use/actions.jsonl` | Every action, with long text truncated |
 | `~/Library/Caches/mac-use/` | Latest screenshots |
 
-Setting `MAC_USE_HOME` makes mac-use use that directory in place of `~` for all of these paths. The tests rely on it.
+Test builds (compiled with `-D MAC_USE_TESTING`, as `test.sh` does) let `MAC_USE_HOME` replace `~` for all of these paths. The normal build ignores it, so an agent cannot redirect the pause file, config or log.
 
 ## Tests
 

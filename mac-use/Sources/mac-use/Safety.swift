@@ -2,8 +2,12 @@ import AppKit
 import CoreGraphics
 
 enum Paths {
+#if MAC_USE_TESTING
     static let home = ProcessInfo.processInfo.environment["MAC_USE_HOME"].map { URL(fileURLWithPath: $0) }
         ?? FileManager.default.homeDirectoryForCurrentUser
+#else
+    static let home = FileManager.default.homeDirectoryForCurrentUser
+#endif
     static let support = home.appendingPathComponent("Library/Application Support/mac-use")
     static let logs = home.appendingPathComponent("Library/Logs/mac-use")
     static let caches = home.appendingPathComponent("Library/Caches/mac-use")

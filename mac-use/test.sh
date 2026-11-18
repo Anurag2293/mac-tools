@@ -19,11 +19,11 @@ fail() {
 product=""
 tests=""
 if stale "$build/mac-use"; then
-    ./build.sh "$build/mac-use" > "$build/product.log" 2>&1 &
+    ./build.sh "$build/mac-use" -D MAC_USE_TESTING > "$build/product.log" 2>&1 &
     product=$!
 fi
 if stale "$build/mac-use-tests"; then
-    swiftc -swift-version 5 -target arm64-apple-macosx14.0 \
+    swiftc -D MAC_USE_TESTING -swift-version 5 -target arm64-apple-macosx14.0 \
         $(ls Sources/mac-use/*.swift | grep -v '/main\.swift$') Tests/*.swift -o "$build/mac-use-tests" > "$build/tests.log" 2>&1 &
     tests=$!
 fi

@@ -3,6 +3,7 @@
 set -e
 cd "$(dirname "$0")"
 out="${1:-bin/mac-use}"
+[ $# -eq 0 ] || shift
 mkdir -p "$(dirname "$out")"
-swiftc -O -swift-version 5 -target arm64-apple-macosx14.0 Sources/mac-use/*.swift -o "$out"
+swiftc -O -swift-version 5 -target arm64-apple-macosx14.0 "$@" Sources/mac-use/*.swift -o "$out"
 echo "built $(cd "$(dirname "$out")" && pwd)/$(basename "$out")"
