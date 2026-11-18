@@ -14,7 +14,7 @@ final class FakeApple {
     }
 }
 
-private func makeTranslator(engine: String = "google", net: FakeGoogle = FakeGoogle(), apple: FakeApple = FakeApple())
+@MainActor private func makeTranslator(engine: String = "google", net: FakeGoogle = FakeGoogle(), apple: FakeApple = FakeApple())
     -> (Translator, FakeGoogle, FakeApple) {
     var env = ["LENS_ENGINE": engine]
     env["LENS_FROM"] = "ja"
@@ -22,13 +22,13 @@ private func makeTranslator(engine: String = "google", net: FakeGoogle = FakeGoo
     return (t, net, apple)
 }
 
-private func run(_ t: Translator, _ texts: [String]) async throws -> [Int: String] {
+@MainActor private func run(_ t: Translator, _ texts: [String]) async throws -> [Int: String] {
     var got: [Int: String] = [:]
     try await t.translate(texts) { got[$0] = $1 }
     return got
 }
 
-func translatorTests() async {
+@MainActor func translatorTests() async {
     let savedSink = logSink
     var logs: [String] = []
     logSink = { logs.append($0) }
@@ -75,6 +75,15 @@ func translatorTests() async {
             }
             try await t.translate(["new", "a"]) { i, _ in order.append(i) }
             eq(order, [1, -1, 0])
+        }
+        await test("every callback runs on the main thread: google, cached and fallback") {
+            let (t, net, _) = makeTranslator()
+            var threads: [Bool] = []
+            try await t.translate(["a"]) { _, _ in threads.append(Thread.isMainThread) }
+            try await t.translate(["a"]) { _, _ in threads.append(Thread.isMainThread) }
+            net.override = { _, _ in throw URLError(.notConnectedToInternet) }
+            try await t.translate(["z"]) { _, _ in threads.append(Thread.isMainThread) }
+            eq(threads, [true, true, true])
         }
         await test("only uncached texts are sent, with their own indices") {
             let (t, net, _) = makeTranslator()

@@ -365,8 +365,8 @@ func googleTranslate(_ texts: [String], from: String, to: String, via transport:
 
 /// Translations by original text. Google by default (engine "apple" for on-device only); if
 /// Google fails, `fallback` translates on-device.
-final class Translator {
-    typealias Fallback = (_ pending: [(index: Int, text: String)], _ each: (Int, String) -> Void) async throws -> Void
+@MainActor final class Translator {
+    typealias Fallback = @MainActor (_ pending: [(index: Int, text: String)], _ each: (Int, String) -> Void) async throws -> Void
 
     var cache: [String: String] = [:]
     var config: Config
